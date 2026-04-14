@@ -1,5 +1,5 @@
 /**
- * PROJECT BUSHIRI v3.3
+ * PROJECT BUSHIRI v3.5
  * MPESA/MIXX Captive Portal + NAT Router + VPS Verify
  * Bei: TZS 800 = Masaa 15
  *
@@ -28,12 +28,12 @@ const int   VPS_PORT     = 443;
 const char* VPS_TOKEN    = "bushiri2026";
 const char* PORTAL_TITLE = "BUSHIRI HOTSPOT";
 const char* MIXX_NUMBER  = "0717633805";
-const char* STA_SSID_ALT = "infinitynetwork";
-const char* STA_PASS_ALT = ".kibushi1";
+const char* STA_SSID_ALT = "PATA HUDUMA";
+const char* STA_PASS_ALT = "AMUDUH123";
 String ownerIP           = "192.168.4.2";
 // ======================================================
 
-#define VERSION      "3.3.0"
+#define VERSION      "3.5.0"
 #define MAX_CLIENTS  20
 // 192.168.4.1 = 0xC0A80401  (htonl itabadilisha byte order)
 #define AP_IP_HEX    0xC0A80401UL
@@ -207,7 +207,7 @@ bool verifyWithVPS(String txid, String ip, String &message) {
   message      = res["message"] | String("Hitilafu");
 
   if (success) {
-    addSession(ip, 15UL * 3600000UL); // Masaa 15
+    addSession(ip, 14UL * 3600000UL); // Masaa 14 (inaonyesha siku 1 kwa mteja)
   }
   return success;
 }
@@ -302,9 +302,19 @@ void setupWebServer() {
     if (isAuthorized(ip)) server.send(204, "text/plain", "");
     else { server.sendHeader("Location","http://192.168.4.1/"); server.send(302,"text/plain",""); }
   });
-  server.on("/hotspot-detect.html", HTTP_GET, []() {   // iOS
+  server.on("/gen_204", HTTP_GET, []() {               // Android (alternative)
     String ip = server.client().remoteIP().toString();
-    if (isAuthorized(ip)) server.send(200,"text/html","<HTML><BODY>Success</BODY></HTML>");
+    if (isAuthorized(ip)) server.send(204, "text/plain", "");
+    else { server.sendHeader("Location","http://192.168.4.1/"); server.send(302,"text/plain",""); }
+  });
+  server.on("/hotspot-detect.html", HTTP_GET, []() {   // iOS/iPhone
+    String ip = server.client().remoteIP().toString();
+    if (isAuthorized(ip)) server.send(200,"text/html","<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+    else { server.sendHeader("Location","http://192.168.4.1/"); server.send(302,"text/plain",""); }
+  });
+  server.on("/library/test/success.html", HTTP_GET, []() { // iOS (alternative)
+    String ip = server.client().remoteIP().toString();
+    if (isAuthorized(ip)) server.send(200,"text/html","<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
     else { server.sendHeader("Location","http://192.168.4.1/"); server.send(302,"text/plain",""); }
   });
   server.on("/connecttest.txt", HTTP_GET, []() {       // Windows
@@ -312,9 +322,19 @@ void setupWebServer() {
     if (isAuthorized(ip)) server.send(200,"text/plain","Microsoft Connect Test");
     else { server.sendHeader("Location","http://192.168.4.1/"); server.send(302,"text/plain",""); }
   });
-  server.on("/success.txt", HTTP_GET, []() {           // Samsung
+  server.on("/ncsi.txt", HTTP_GET, []() {              // Windows (alternative)
+    String ip = server.client().remoteIP().toString();
+    if (isAuthorized(ip)) server.send(200,"text/plain","Microsoft NCSI");
+    else { server.sendHeader("Location","http://192.168.4.1/"); server.send(302,"text/plain",""); }
+  });
+  server.on("/success.txt", HTTP_GET, []() {           // Samsung/Android
     String ip = server.client().remoteIP().toString();
     if (isAuthorized(ip)) server.send(200,"text/plain","success");
+    else { server.sendHeader("Location","http://192.168.4.1/"); server.send(302,"text/plain",""); }
+  });
+  server.on("/kindle-wifi/wifistub.html", HTTP_GET, []() { // Amazon/Kindle
+    String ip = server.client().remoteIP().toString();
+    if (isAuthorized(ip)) server.send(200,"text/html","");
     else { server.sendHeader("Location","http://192.168.4.1/"); server.send(302,"text/plain",""); }
   });
 
@@ -330,52 +350,81 @@ String getClientIP() {
 void captiveRedirect() {
   String ip = getClientIP();
   if (isAuthorized(ip)) { server.send(204, "text/plain", ""); return; }
+  // Redirect yoyote kwenda portal — inafanya kazi Android, iPhone, Windows
   server.sendHeader("Location", "http://192.168.4.1/", true);
   server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-  server.send(302, "text/plain", "");
+  server.sendHeader("Pragma", "no-cache");
+  server.sendHeader("Expires", "-1");
+  server.send(302, "text/plain", "Redirecting...");
 }
 
 // ==================== PORTAL PAGE ====================
 void portalPage() {
   String ip = getClientIP();
-  if (isAuthorized(ip)) { server.sendHeader("Location","http://google.com"); server.send(302); return; }
+  // Kama ameshalipia - mpeleke moja kwa moja bila kusimamishwa
+  if (isAuthorized(ip)) {
+    server.sendHeader("Location", "http://google.com");
+    server.send(302);
+    return;
+  }
 
   String html = R"(<!DOCTYPE html><html><head>
 <meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>BUSHIRI HOTSPOT</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',sans-serif}
-body{background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);min-height:100vh;display:flex;align-items:center;justify-content:center}
-.card{max-width:380px;width:93%;background:white;border-radius:20px;overflow:hidden;box-shadow:0 25px 50px rgba(0,0,0,0.4)}
-.header{background:linear-gradient(135deg,#e91e63,#c2185b);color:white;padding:30px;text-align:center}
-.wifi-icon{font-size:3em;margin-bottom:8px}
-.brand{font-size:1.5em;font-weight:700;letter-spacing:2px}
-.tagline{font-size:.85em;opacity:.9;margin-top:4px}
-.body{padding:25px}
-.price-box{background:#f8f9fa;border-radius:12px;padding:18px;text-align:center;margin-bottom:20px;border:2px solid #e91e63}
-.price{font-size:2.2em;font-weight:800;color:#e91e63}
-.price-label{color:#666;font-size:.9em;margin-top:3px}
-.step{display:flex;align-items:center;padding:8px 0;border-bottom:1px solid #f0f0f0;font-size:.9em;color:#444}
-.step-num{background:#e91e63;color:white;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:.8em;margin-right:10px;flex-shrink:0}
-.btn{display:block;width:100%;padding:15px;background:linear-gradient(135deg,#e91e63,#c2185b);color:white;border:none;border-radius:12px;font-size:1.1em;font-weight:700;text-align:center;text-decoration:none;margin-top:15px}
-.mixx-num{background:#e8f5e9;border-radius:8px;padding:10px;text-align:center;font-weight:700;font-size:1.1em;color:#2e7d32;margin:10px 0}
+body{background:linear-gradient(135deg,#0a0a1a,#1a1035,#0d2040);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:15px}
+.card{max-width:390px;width:100%;background:white;border-radius:24px;overflow:hidden;box-shadow:0 30px 60px rgba(0,0,0,0.5)}
+.header{background:linear-gradient(135deg,#e91e63,#9c27b0);color:white;padding:28px 25px;text-align:center}
+.wifi-icon{font-size:3.5em;margin-bottom:6px}
+.brand{font-size:1.6em;font-weight:800;letter-spacing:3px}
+.tagline{font-size:.82em;opacity:.85;margin-top:5px}
+.body{padding:22px}
+.owner-box{background:linear-gradient(135deg,#fff3e0,#ffe0b2);border-radius:12px;padding:14px;text-align:center;margin-bottom:16px;border:2px solid #ff9800}
+.owner-label{font-size:.75em;color:#e65100;font-weight:600;text-transform:uppercase;letter-spacing:1px}
+.owner-name{font-size:1.05em;font-weight:800;color:#bf360c;margin-top:3px}
+.price-box{background:linear-gradient(135deg,#fce4ec,#f8bbd9);border-radius:12px;padding:16px;text-align:center;margin-bottom:16px;border:2px solid #e91e63}
+.price{font-size:2.5em;font-weight:900;color:#c2185b}
+.price-label{color:#880e4f;font-size:.9em;font-weight:700;margin-top:2px}
+.price-sub{color:#ad1457;font-size:.78em;margin-top:3px;opacity:.8}
+.steps-title{font-size:.8em;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}
+.step{display:flex;align-items:flex-start;padding:9px 0;border-bottom:1px solid #f5f5f5;font-size:.88em;color:#444;line-height:1.4}
+.step-num{background:#e91e63;color:white;border-radius:50%;width:26px;height:26px;min-width:26px;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:.8em;margin-right:10px;margin-top:1px}
+.mixx-box{background:linear-gradient(135deg,#e8f5e9,#c8e6c9);border-radius:10px;padding:12px;text-align:center;margin:10px 0;border:2px solid #4caf50}
+.mixx-label{font-size:.75em;color:#1b5e20;font-weight:600;text-transform:uppercase}
+.mixx-num{font-size:1.4em;font-weight:900;color:#2e7d32;letter-spacing:2px;margin-top:3px}
+.mixx-name{font-size:.8em;color:#388e3c;font-weight:600;margin-top:2px}
+.btn{display:block;width:100%;padding:16px;background:linear-gradient(135deg,#e91e63,#9c27b0);color:white;border:none;border-radius:14px;font-size:1.1em;font-weight:800;text-align:center;text-decoration:none;margin-top:16px;letter-spacing:.5px;box-shadow:0 4px 15px rgba(233,30,99,0.4)}
+.note{font-size:.75em;color:#999;text-align:center;margin-top:10px;line-height:1.4}
 </style></head><body>
 <div class='card'>
   <div class='header'>
     <div class='wifi-icon'>📶</div>
     <div class='brand'>)" + String(PORTAL_TITLE) + R"(</div>
-    <div class='tagline'>Internet ya haraka na ya uhakika</div>
+    <div class='tagline'>Karibu! Lipa kidogo — pumzika siku nzima</div>
   </div>
   <div class='body'>
+    <div class='owner-box'>
+      <div class='owner-label'>Mtoa Huduma</div>
+      <div class='owner-name'>👤 HAMISI BUSHIRI LUONGO</div>
+    </div>
     <div class='price-box'>
       <div class='price'>TZS 800</div>
-      <div class='price-label'>= Masaa 15 ya internet</div>
+      <div class='price-label'>🌐 Siku Nzima ya Internet</div>
+      <div class='price-sub'>Unganika asubuhi — toka usiku</div>
     </div>
-    <div class='step'><div class='step-num'>1</div>Tuma TZS 800 kwa MIXX BY YAS</div>
-    <div class='step'><div class='step-num'>2</div>Nambari ya kulipa:</div>
-    <div class='mixx-num'>📱 )" + String(MIXX_NUMBER) + R"(</div>
-    <div class='step'><div class='step-num'>3</div>Bonyeza hapa chini - weka namba ya kumbukumbu</div>
-    <a href='/pay' class='btn'>✅ Nimelipa - Ingia Sasa</a>
+    <div class='steps-title'>📋 Jinsi ya Kulipa</div>
+    <div class='step'><div class='step-num'>1</div><span>Fungua simu yako — nenda MIXX BY YAS</span></div>
+    <div class='step'><div class='step-num'>2</div><span>Tuma <b>TZS 800</b> kwa namba hii:</span></div>
+    <div class='mixx-box'>
+      <div class='mixx-label'>MIXX BY YAS — Namba ya Kulipa</div>
+      <div class='mixx-num'>📱 )" + String(MIXX_NUMBER) + R"(</div>
+      <div class='mixx-name'>HAMISI BUSHIRI LUONGO</div>
+    </div>
+    <div class='step'><div class='step-num'>3</div><span>Pokea SMS ya uthibitisho — namba ya <b>Kumbukumbu</b> itaonekana</span></div>
+    <div class='step'><div class='step-num'>4</div><span>Bonyeza kitufe hapa chini — weka namba ya kumbukumbu</span></div>
+    <a href='/pay' class='btn'>✅ Nimelipa — Ingia Sasa</a>
+    <div class='note'>⚠️ Malipo ya MIXX BY YAS tu · Hakuna M-PESA</div>
   </div>
 </div></body></html>)";
 
@@ -473,7 +522,7 @@ h1{font-size:1.8em;margin-bottom:10px}
   <p>Internet imewashwa!</p>
   <div class='info'>
     <div class='info-item'><span>📱 Simu</span><span>)" + phone.substring(0,4) + R"(******</span></div>
-    <div class='info-item'><span>⏰ Muda</span><span>)" + String(isTrial?"Dakika 30 (Trial)":"Masaa 15") + R"(</span></div>
+    <div class='info-item'><span>⏰ Muda</span><span>)" + String(isTrial?"Dakika 30 (Trial)":"Siku 1 Nzima") + R"(</span></div>
   </div>
   <p>Inakupeleka Google baada ya sekunde 5...</p>
   <a href='http://google.com' class='btn'>🌐 Nenda Internet</a>
