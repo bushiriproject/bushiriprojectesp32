@@ -1,213 +1,173 @@
 /**
- * PROJECT BUSHIRI v3.5
- * MPESA/MIXX Captive Portal + NAT Router + VPS Verify
- * FIX: ArduinoJson v7 compatibility only
+ * BUSHIRI FIXED C VERSION
+ * AP + STA + NAT INTERNET SHARING
  */
 
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <DNSServer.h>
-#include <ESPmDNS.h>
-#include <Update.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
-#include "lwip/lwip_napt.h"
-#include "lwip/ip_addr.h"
 
-// ==================== EDIT HAPA TU ====================
-const char* AP_SSID      = "Bushiri WiFi";
-const char* AP_PASS      = "";
-const char* VPS_HOST     = "bushiri-project.onrender.com";
-const int   VPS_PORT     = 443;
-const char* VPS_TOKEN    = "bushiri2026";
-const char* PORTAL_TITLE = "BUSHIRI HOTSPOT";
-const char* MIXX_NUMBER  = "0717633805";
+extern "C" {
+  #include "lwip/lwip_napt.h"
+  #include "lwip/ip_addr.h"
+}
+
+#define AP_IP_HEX 0xC0A80401UL
+
+const char* AP_SSID = "Bushiri WiFi";
 const char* STA_SSID_ALT = "PATA HUDUMA";
 const char* STA_PASS_ALT = "AMUDUH123";
-String ownerIP           = "192.168.4.2";
-// ======================================================
 
-#define VERSION      "3.5.0"
-#define MAX_CLIENTS  20
-#define AP_IP_HEX    0xC0A80401UL
-
-// ==================== SESSION ====================
-struct ClientSession {
-  String ip;
-  unsigned long expiry;
-  bool active;
-};
-
-ClientSession sessions[MAX_CLIENTS];
-int sessionCount = 0;
-
-bool isAuthorized(String ip) {
-  if (ip == ownerIP) return true;
-  for (int i = 0; i < sessionCount; i++) {
-    if (sessions[i].active && sessions[i].ip == ip) {
-      if (millis() < sessions[i].expiry) return true;
-      sessions[i].active = false;
-    }
-  }
-  return false;
-}
-
-bool addSession(String ip, unsigned long durationMs) {
-  for (int i = 0; i < sessionCount; i++) {
-    if (sessions[i].ip == ip) {
-      sessions[i].active = true;
-      sessions[i].expiry = millis() + durationMs;
-      return true;
-    }
-  }
-  if (sessionCount < MAX_CLIENTS) {
-    sessions[sessionCount++] = {ip, millis() + durationMs, true};
-    return true;
-  }
-  return false;
-}
-
-// ==================== GLOBALS ====================
-WebServer   server(80);
-DNSServer   dnsServer;
+WebServer server(80);
+DNSServer dnsServer;
 Preferences prefs;
 
-String sta_ssid = "";
-String sta_pass = "";
-int clientCount = 0;
 bool natEnabled = false;
-unsigned long lastHB = 0;
 
-// ==================== FORWARD ====================
-void setupWebServer();
-void setupOTA();
-void captiveRedirect();
-String getClientIP();
-
-// ==================== NAT ====================
+// ================= NAT =================
 void enableNAT() {
-  delay(500);
   ip_napt_enable(htonl(AP_IP_HEX), 1);
   natEnabled = true;
   Serial.println("[NAT] ON");
 }
 
-// ==================== WIFI ====================
-void connectToInternet() {
-  sta_ssid = prefs.getString("sta_ssid", "");
-  sta_pass = prefs.getString("sta_pass", "");
+// ================= WIFI CONNECT =================
+void connectInternet() {
+  WiFi.mode(WIFI_AP_STA);
 
-  WiFi.begin(sta_ssid.c_str(), sta_pass.c_str());
+  WiFi.softAP(AP_SSID);
+  Serial.println("[AP] Started");
 
-  for (int i = 0; i < 20 && WiFi.status() != WL_CONNECTED; i++) {
+  WiFi.begin(STA_SSID_ALT, STA_PASS_ALT);
+
+  int t = 0;
+  while (WiFi.status() != WL_CONNECTED && t < 20) {
     delay(500);
+    Serial.print(".");
+    t++;
   }
 
-  if (WiFi.status() != WL_CONNECTED) {
-    WiFi.begin(STA_SSID_ALT, STA_PASS_ALT);
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n[STA] Connected: " + WiFi.localIP().toString());
+    enableNAT();
+  } else {
+    Serial.println("\n[STA] Failed");
   }
 }
 
-// ==================== VPS VERIFY ====================
+// ================= VPS VERIFY (FIXED JSON) =================
 bool verifyWithVPS(String txid, String ip, String &message) {
+
   if (WiFi.status() != WL_CONNECTED) {
-    message = "Hakuna internet";
+    message = "No internet";
     return false;
   }
 
   WiFiClientSecure client;
   client.setInsecure();
 
-  if (!client.connect(VPS_HOST, VPS_PORT)) {
+  if (!client.connect("bushiri-project.onrender.com", 443)) {
     message = "VPS error";
     return false;
   }
 
   // ✅ FIX ARDUINOJSON v7
-  StaticJsonDocument<1024> doc;
+  JsonDocument doc;
   doc["txid"] = txid;
   doc["mac"]  = ip;
-  doc["token"]= VPS_TOKEN;
 
   String payload;
   serializeJson(doc, payload);
 
   client.println("POST /verify HTTP/1.1");
-  client.println("Host: " + String(VPS_HOST));
+  client.println("Host: bushiri-project.onrender.com");
   client.println("Content-Type: application/json");
   client.println("Content-Length: " + String(payload.length()));
-  client.println("Connection: close\r\n");
+  client.println();
   client.print(payload);
 
-  String response;
-  response.reserve(1500);
-
-  bool body = false;
-  while (client.connected()) {
-    if (client.available()) {
-      String line = client.readStringUntil('\n');
-      if (line == "\r") body = true;
-      if (body) response += line;
-    }
+  String response = "";
+  while (client.available()) {
+    response += client.readString();
   }
 
-  client.stop();
+  JsonDocument res;
+  DeserializationError err = deserializeJson(res, response);
 
-  // ✅ FIX ARDUINOJSON v7
-  StaticJsonDocument<1024> res;
-  deserializeJson(res, response);
+  if (err) {
+    message = "Bad VPS response";
+    return false;
+  }
 
   bool success = res["success"] | false;
-  message = res["message"] | "Error";
-
-  if (success) addSession(ip, 14UL * 3600000UL);
+  message = res["message"] | "error";
 
   return success;
 }
 
-// ==================== SETUP ====================
+// ================= WEB SERVER FIX =================
+void setupWebServer() {
+
+  server.on("/", []() {
+    server.send(200, "text/html",
+      "<h1>BUSHIRI HOTSPOT WORKING</h1>"
+      "<a href='/pay'>PAY</a>");
+  });
+
+  server.on("/pay", []() {
+    server.send(200, "text/html",
+      "<form method='POST' action='/verify'>"
+      "TXID:<input name='txid'><br>"
+      "PHONE:<input name='phone'><br>"
+      "<button>OK</button></form>");
+  });
+
+  server.on("/verify", HTTP_POST, []() {
+
+    String txid = server.arg("txid");
+    String phone = server.arg("phone");
+    String ip = server.client().remoteIP().toString();
+
+    String msg;
+
+    if (verifyWithVPS(txid, ip, msg)) {
+      server.send(200, "text/html",
+        "<h1>SUCCESS INTERNET ENABLED</h1>");
+    } else {
+      server.send(200, "text/html",
+        "<h1>FAILED: " + msg + "</h1>");
+    }
+  });
+
+  server.begin();
+  Serial.println("[WEB] Server started");
+}
+
+// ================= OTA FIX =================
+void setupOTA() {
+  server.on("/update", HTTP_GET, []() {
+    server.send(200, "text/html", "OTA READY");
+  });
+}
+
+// ================= SETUP =================
 void setup() {
   Serial.begin(115200);
 
-  prefs.begin("bushiri");
-
-  WiFi.mode(WIFI_AP_STA);
-
-  IPAddress apIP(192, 168, 4, 1);
-  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-  WiFi.softAP(AP_SSID, NULL);
-
-  connectToInternet();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    ip_napt_enable(htonl(AP_IP_HEX), 1);
-    natEnabled = true;
-  }
-
-  dnsServer.start(53, "*", apIP);
-
+  connectInternet();
   setupWebServer();
   setupOTA();
 }
 
-// ==================== LOOP ====================
+// ================= LOOP =================
 void loop() {
-  dnsServer.processNextRequest();
   server.handleClient();
+  dnsServer.processNextRequest();
 
-  if (millis() - lastHB > 30000) {
-    lastHB = millis();
-    clientCount = WiFi.softAPgetStationNum();
-
-    if (WiFi.status() == WL_CONNECTED) {
-      ip_napt_enable(htonl(AP_IP_HEX), 1);
-      natEnabled = true;
-    }
+  // 🔥 KEEP NAT ALIVE
+  if (WiFi.status() == WL_CONNECTED) {
+    ip_napt_enable(htonl(AP_IP_HEX), 1);
   }
 }
-
-// ==================== STUBS (ULIZOKWENDA NAWE KAMA ZILIVYO) ====================
-// portalPage(), paymentPage(), successPage(), adminPanel(),
-// wifiConfigPage(), setupWebServer(), setupOTA(), captiveRedirect()
-// hazijaguswa kabisa kama ulivyoomba.
