@@ -1,4 +1,4 @@
-name: Build Bushiri Firmware
+name: Build hashiru bushiri Firmware
 
 on:
   push:
