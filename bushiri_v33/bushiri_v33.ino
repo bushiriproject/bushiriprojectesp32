@@ -1,11 +1,10 @@
 /**
- * PROJECT BUSHIRI v3.6 (STABLE FIXED)
- * Captive Portal + NAT + VPS Verification
- * FIXED: ArduinoJson v7 + linker + NAT stability
+ * PROJECT BUSHIRI v3.6 FIX FINAL
+ * ESP32 3.3.8 + ArduinoJson v7 COMPATIBLE
  */
 
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
+#include <NetworkClientSecure.h>   // FIXED HERE
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <Update.h>
@@ -79,20 +78,6 @@ void addSession(String ip, unsigned long ms) {
 void enableNAT() {
   ip_napt_enable(htonl(AP_IP_HEX), 1);
   natOn = true;
-  Serial.println("[NAT] ON");
-}
-
-// ================= WIFI RECOVERY =================
-void checkWiFi() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WiFi] reconnect...");
-    WiFi.reconnect();
-    delay(2000);
-
-    if (WiFi.status() == WL_CONNECTED) {
-      enableNAT();
-    }
-  }
 }
 
 // ================= VPS VERIFY =================
@@ -103,7 +88,9 @@ bool verifyVPS(String txid, String ip, String &msg) {
     return false;
   }
 
-  WiFiClientSecure client;
+  // FIX: NetworkClientSecure
+  NetworkClientSecure client;
+
   client.setInsecure();
 
   if (!client.connect(VPS_HOST, VPS_PORT)) {
@@ -111,7 +98,6 @@ bool verifyVPS(String txid, String ip, String &msg) {
     return false;
   }
 
-  // FIX ArduinoJson v7
   JsonDocument doc;
   doc["txid"] = txid;
   doc["ip"] = ip;
@@ -139,7 +125,7 @@ bool verifyVPS(String txid, String ip, String &msg) {
   DeserializationError err = deserializeJson(res, response);
 
   if (err) {
-    msg = "Invalid VPS response";
+    msg = "Bad VPS response";
     return false;
   }
 
@@ -151,33 +137,19 @@ bool verifyVPS(String txid, String ip, String &msg) {
   return ok;
 }
 
-// ================= PORTAL =================
+// ================= WEB =================
 void portal() {
-  String ip = getIP();
-
-  if (isAuthorized(ip)) {
-    server.sendHeader("Location", "http://google.com");
-    server.send(302);
-    return;
-  }
-
-  server.send(200, "text/html",
-    "<h1>BUSHIRI WIFI</h1>"
-    "<a href='/pay'>Lipa</a>");
+  server.send(200, "text/html", "<h1>BUSHIRI WIFI</h1><a href='/pay'>PAY</a>");
 }
 
-// ================= PAYMENT =================
 void pay() {
   server.send(200, "text/html",
-    "<form method='POST' action='/verify'>"
-    "TXID:<input name='txid'>"
-    "<button>OK</button></form>");
+    "<form method='POST' action='/verify'>TXID:<input name='txid'><button>OK</button></form>");
 }
 
-// ================= VERIFY =================
 void verify() {
-  String txid = server.arg("txid");
   String msg;
+  String txid = server.arg("txid");
 
   if (verifyVPS(txid, getIP(), msg)) {
     server.send(200, "text/html", "OK INTERNET");
@@ -186,21 +158,18 @@ void verify() {
   }
 }
 
-// ================= ADMIN =================
-void admin() {
-  server.send(200, "text/html",
-    "<h2>ADMIN</h2>"
-    "<p>Clients: " + String(WiFi.softAPgetStationNum()) + "</p>"
-    "<p>NAT: " + String(natOn ? "ON" : "OFF") + "</p>");
-}
+// ================= SETUP =================
+void setup() {
+  Serial.begin(115200);
 
-// ================= SETUP WEB =================
-void setupWeb() {
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(AP_SSID);
+
+  dns.start(53, "*", IPAddress(192,168,4,1));
 
   server.on("/", portal);
   server.on("/pay", pay);
   server.on("/verify", HTTP_POST, verify);
-  server.on("/admin", admin);
 
   server.onNotFound([]() {
     server.sendHeader("Location", "/");
@@ -208,36 +177,10 @@ void setupWeb() {
   });
 
   server.begin();
-  Serial.println("[WEB] Ready");
-}
-
-// ================= SETUP =================
-void setup() {
-  Serial.begin(115200);
-
-  WiFi.mode(WIFI_AP_STA);
-
-  IPAddress apIP(192,168,4,1);
-  WiFi.softAP(AP_SSID);
-
-  dns.start(53, "*", apIP);
-
-  setupWeb();
-
-  Serial.println("READY");
-
-  if (WiFi.status() == WL_CONNECTED) {
-    enableNAT();
-  }
 }
 
 // ================= LOOP =================
 void loop() {
   dns.processNextRequest();
   server.handleClient();
-
-  if (millis() - lastCheck > 10000) {
-    lastCheck = millis();
-    checkWiFi();
-  }
 }
