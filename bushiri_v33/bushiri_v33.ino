@@ -201,9 +201,9 @@ void setup() {
     if (!server.authenticate("admin", adminPassword)) return server.requestAuthentication();
     
     DynamicJsonDocument doc(2048);
-    doc["total"] = clientCount;
-    doc["online"] = doc["online"].is<int>() ? doc["online"].as<int>() + 1 : 1;
-    doc["wifi"] = wifiConnected ? currentSSID.c_str() : "";
+doc["total"] = clientCount;
+doc["online"] = doc["online"].is<int>() ? doc["online"].as<int>() + 1 : 1;
+doc["wifi"] = wifiConnected ? currentSSID.c_str() : "";
     
     JsonArray clientsList = doc.createNestedArray("clients");
     for (int i = 0; i < clientCount; i++) {
