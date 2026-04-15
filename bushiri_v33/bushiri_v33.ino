@@ -112,188 +112,106 @@ void enableNAT() {
   Serial.println("[NAT] Imewashwa - 192.168.4.1");
 }
 
-// ==================== WIFI ====================
-void connectToInternet() {bool hasInternet() {
+// ==================== WIFI ===================
+bool hasInternet() {
   WiFiClient client;
   return client.connect("8.8.8.8", 53);
 }
+
+void connectToInternet() {
+
   sta_ssid = prefs.getString("sta_ssid", "");
   sta_pass = prefs.getString("sta_pass", "");
 
   if (sta_ssid.length() > 0) {
     Serial.print("[WiFi] Unganika: " + sta_ssid);
     WiFi.begin(sta_ssid.c_str(), sta_pass.c_str());
+
     for (int t = 0; t < 20 && WiFi.status() != WL_CONNECTED; t++) {
       delay(500); Serial.print(".");
-    } 
-if (WiFi.status() == WL_CONNECTED && hasInternet()) {
-  Serial.println("[WAN] Internet OK");
-  return;
-}
+    }
+
+    if (WiFi.status() == WL_CONNECTED && hasInternet()) {
+      Serial.println("\n[WAN] Internet OK");
+      return;
+    }
+
     Serial.println("\n[WiFi] Imeshindwa, jaribu backup...");
   }
 
   Serial.print("[WiFi] Backup: " + String(STA_SSID_ALT));
   WiFi.begin(STA_SSID_ALT, STA_PASS_ALT);
+
   for (int t = 0; t < 20 && WiFi.status() != WL_CONNECTED; t++) {
     delay(500); Serial.print(".");
   }
-  
+
+  if (WiFi.status() == WL_CONNECTED && hasInternet()) {
     Serial.println("\n[WiFi] Backup OK: " + WiFi.localIP().toString());
-   } else {
+  } else {
     Serial.println("\n[WiFi] Hakuna internet");
   }
 }
 
+
+// ==================== MAINTAIN WIFI ====================
 void maintainWiFi() {
-  if (WiFi.status() != WL_CONNECTED) {
+  if (WiFi.status() != WL_CONNECTED || !hasInternet()) {
     natEnabled = false;
     Serial.println("[WiFi] Imekatika - inajaribu...");
     connectToInternet();
- if  (WiFi.status() == WL_CONNECTED && hasInternet()) enableNAT();
-  }
-}
 
-// ==================== VPS VERIFY ====================
-bool verifyWithVPS(String txid, String ip, String &message) {
-  if (WiFi.status() != WL_CONNECTED) {
-    message = "Hakuna internet - jaribu tena";
-    return false;
-  }
-
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(30);
-
-  if (!client.connect(VPS_HOST, VPS_PORT)) {
-    message = "VPS haipatikani - jaribu tena";
-    return false;
-  }
-
-  // ArduinoJson v7: tumia JsonDocument (DynamicJsonDocument imetolewa)
-  JsonDocument doc;
-  doc["txid"]  = txid;
-  doc["mac"]   = ip;
-  doc["token"] = VPS_TOKEN;
-  String payload;
-  serializeJson(doc, payload);
-
-  client.println("POST /verify HTTP/1.1");
-  client.println("Host: " + String(VPS_HOST));
-  client.println("Content-Type: application/json");
-  client.println("Content-Length: " + String(payload.length()));
-  client.println("Connection: close");
-  client.println();
-  client.print(payload);
-
-  String response   = "";
-  unsigned long tout = millis() + 15000;
-  bool headersEnded = false;
-  while (client.connected() && millis() < tout) {
-    if (client.available()) {
-      String line = client.readStringUntil('\n');
-      if (line == "\r") headersEnded = true;
-      if (headersEnded) response += line;
+    if (WiFi.status() == WL_CONNECTED && hasInternet()) {
+      enableNAT();
     }
   }
-  client.stop();
-  response.trim();
-
-  JsonDocument res;
-  DeserializationError err = deserializeJson(res, response);
-  if (err) {
-    message = "VPS ilijibu vibaya";
-    return false;
-  }
-
-  bool success = res["success"] | false;
-  message      = res["message"] | String("Hitilafu");
-
-  if (success) {
-    addSession(ip, 14UL * 3600000UL); // Masaa 14 (inaonyesha siku 1 kwa mteja)
-  }
-  return success;
 }
+
 
 // ==================== SETUP ====================
 void setup() {
   Serial.begin(115200);
   delay(2000);
-  Serial.println("=================================");
-  Serial.println("  BUSHIRI v" VERSION " - APSTA+NAT  ");
-  Serial.println("=================================");
 
   prefs.begin("bushiri");
 
-  // Mode APSTA: STA = internet kutoka modem, AP = kusambaza kwa wateja
   WiFi.mode(WIFI_AP_STA);
 
-  // Sanidi AP
   IPAddress apIP(192, 168, 4, 1);
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-  WiFi.softAP(AP_SSID, (strlen(AP_PASS) >= 8) ? AP_PASS : NULL, 6, 0, 8);
-  Serial.println("[AP] Imewashwa: " + String(AP_SSID));
+  WiFi.softAP(AP_SSID, AP_PASS);
 
-  // Unganika na internet
   connectToInternet();
-
-  // Washa NAT kama internet ipo
-  if (WiFi.status() == WL_CONNECTED) {
-    delay(1000);
-    enableNAT();
-  }
-
-  // DNS - captive portal (jibu "*" na IP ya AP)
-  dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
-  dnsServer.start(53, "*", apIP);
-
-  setupWebServer();
-  setupOTA();
-
-  Serial.println("[READY] Admin: http://192.168.4.1/admin");
-}
-
-// ==================== LOOP ====================
-void loop() {if (WiFi.status() != WL_CONNECTED || !hasInternet()) {
-  Serial.println("[WAN] reconnecting...");
-  connectToInternet();
-  delay(2000);
 
   if (WiFi.status() == WL_CONNECTED && hasInternet()) {
     enableNAT();
   }
-}
-  dnsServer.processNextRequest();
-  server.handleClient();
 
-  if (millis() - lastHB > 30000) {
-    lastHB      = millis();
-    clientCount = WiFi.softAPgetStationNum();
-    Serial.printf("[HB] Clients:%d Sessions:%d NAT:%s WiFi:%s\n",
-      clientCount, sessionCount,
-      natEnabled ? "ON" : "OFF",
-      WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : "X");
+  dnsServer.start(53, "*", apIP);
 
-    maintainWiFi();
-    // Refresh NAT periodically
-    if (WiFi.status() == WL_CONNECTED) {
-     if (WiFi.status() == WL_CONNECTED && !natEnabled) {
-  enableNAT();
+  setupWebServer();
+  setupOTA();
 }
-      natEnabled = true;
+
+
+// ==================== LOOP ====================
+void loop() {
+
+  if (WiFi.status() != WL_CONNECTED || !hasInternet()) {
+    Serial.println("[WAN] reconnect...");
+    connectToInternet();
+
+    if (WiFi.status() == WL_CONNECTED && hasInternet()) {
+      enableNAT();
     }
   }
 
-  delay(10);
-}
-if (WiFi.status() != WL_CONNECTED || !hasInternet()) {
-  Serial.println("[WAN] reconnecting...");
-  connectToInternet();
-  delay(2000);
+  dnsServer.processNextRequest();
+  server.handleClient();
 
-  if (hasInternet()) {
-    enableNAT();
-  }
+  maintainWiFi();
+
+  delay(10);
 }
 // ==================== WEB SERVER ====================
 void setupWebServer() {
