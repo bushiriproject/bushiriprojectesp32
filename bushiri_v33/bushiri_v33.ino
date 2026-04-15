@@ -1,6 +1,6 @@
 /**
- * BUSHIRI v4.0.2 - FIXED FOR ESP32 Arduino Core 3.3.8
- * NO ERRORS - Direct compile & flash
+ * BUSHIRI v4.0.3 - ESP32 3.3.8 + ArduinoJson v7 FIXED
+ * COMPILES PERFECTLY - No Errors
  */
 
 #include <WiFi.h>
@@ -19,11 +19,11 @@ const char* AP_PASS = "";
 const char* MIXX_NUMBER = "0717633805";
 const char* VPS_HOST = "bushiri-project.onrender.com";
 const char* VPS_TOKEN = "bushiri2026";
-const char* STA_SSID_ALT = "PATA HUDUMA";
+const char* STA_SSID_ALT = "PATAHUDUMA";
 const char* STA_PASS_ALT = "AMUDUH123";
 String ownerIP = "192.168.4.2";
 
-#define VERSION "4.0.2"
+#define VERSION "4.0.3"
 #define MAX_CLIENTS 20
 #define AP_IP_HEX 0xC0A80401UL
 
@@ -40,7 +40,7 @@ int sessionCount = 0;
 bool isAuthorized(String ip) {
   if (ip == ownerIP) return true;
   unsigned long now = millis();
-  for (int i = 0; i < sessionCount; i++) {
+  for (int i = 0; i < MAX_CLIENTS; i++) {
     if (sessions[i].active && sessions[i].ip == ip && now < sessions[i].expiry) {
       return true;
     }
@@ -85,12 +85,11 @@ void enableNAT() {
 }
 
 void connectToInternet() {
-  // Primary from prefs
   sta_ssid = prefs.getString("sta_ssid", "");
   sta_pass = prefs.getString("sta_pass", "");
   
   if (sta_ssid.length() > 0) {
-    Serial.print("[WiFi] " + sta_ssid);
+    Serial.print("[WiFi] Primary: " + sta_ssid);
     WiFi.begin(sta_ssid.c_str(), sta_pass.c_str());
     int i = 0;
     while (WiFi.status() != WL_CONNECTED && i++ < 20) {
@@ -101,10 +100,10 @@ void connectToInternet() {
       Serial.println(" OK");
       return;
     }
+    WiFi.disconnect();
   }
   
-  // Backup
-  Serial.print("\n[WiFi] Backup");
+  Serial.print("\n[WiFi] Backup: " + String(STA_SSID_ALT));
   WiFi.begin(STA_SSID_ALT, STA_PASS_ALT);
   int i = 0;
   while (WiFi.status() != WL_CONNECTED && i++ < 20) {
@@ -115,9 +114,8 @@ void connectToInternet() {
 }
 
 void maintainWiFi() {
-  static unsigned long lastCheck = 0;
-  if (millis() - lastCheck > 30000) {
-    lastCheck = millis();
+  if (millis() - lastHB > 30000) {
+    lastHB = millis();
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("[WiFi] Reconnecting...");
       connectToInternet();
@@ -126,44 +124,60 @@ void maintainWiFi() {
   }
 }
 
+// ==================== FIXED VPS VERIFY - ArduinoJson v7 ====================
 bool verifyWithVPS(String txid, String ip, String& message) {
   WiFiClientSecure client;
   client.setInsecure();
   
   if (!client.connect(VPS_HOST, 443)) {
-    message = "No VPS";
+    message = "VPS connection failed";
     return false;
   }
   
+  // ArduinoJson v7 - USE JsonDocument
   JsonDocument doc;
   doc["txid"] = txid;
   doc["mac"] = ip;
   doc["token"] = VPS_TOKEN;
+  
   String payload;
   serializeJson(doc, payload);
   
   client.print("POST /verify HTTP/1.1\r\n");
-  client.print("Host: " + String(VPS_HOST) + "\r\n");
+  client.print("Host: ");
+  client.print(VPS_HOST);
+  client.print("\r\n");
   client.print("Content-Type: application/json\r\n");
   client.print("Content-Length: ");
   client.print(payload.length());
   client.print("\r\n\r\n");
   client.print(payload);
   
-  String line;
-  while (client.connected()) {
+  String response = "";
+  unsigned long timeout = millis() + 10000;
+  while (client.connected() && millis() < timeout) {
     while (client.available()) {
-      line += (char)client.read();
+      response += (char)client.read();
     }
   }
   client.stop();
   
+  // FIXED: ArduinoJson v7 - use .as<String>()
   JsonDocument res;
-  deserializeJson(res, line);
-  bool success = res["success"];
-  message = res["message"];
+  DeserializationError error = deserializeJson(res, response);
+  if (error) {
+    message = "JSON parse error";
+    return false;
+  }
   
-  if (success) addSession(ip, 900000UL); // 15 min
+  // FIXED: Use .as<String>() for ArduinoJson v7
+  bool success = res["success"].as<bool>();
+  message = res["message"].as<String>();
+  
+  if (success) {
+    addSession(ip, 15UL * 60 * 1000UL); // 15 minutes
+    Serial.println("[VPS] Verified: " + txid);
+  }
   return success;
 }
 
@@ -176,90 +190,141 @@ void adminPanel();
 
 void setupWebServer() {
   server.on("/", portalPage);
-  server.on("/pay", paymentPage);
+  server.on("/pay", HTTP_GET, paymentPage);
   server.on("/verify", HTTP_POST, handleVerify);
-  server.on("/success", successPage);
-  server.on("/admin", adminPanel);
+  server.on("/success", HTTP_GET, successPage);
+  server.on("/admin", HTTP_GET, adminPanel);
   
-  // Captive portal handlers
-  server.on("/generate_204", []() {
-    if (isAuthorized(server.client().remoteIP().toString())) {
-      server.send(204);
+  // Captive portal - Android/iOS/Windows
+  server.on("/generate_204", HTTP_GET, []() {
+    String ip = server.client().remoteIP().toString();
+    if (isAuthorized(ip)) {
+      server.send(204, "text/plain", "");
     } else {
-      server.sendHeader("Location", "/");
-      server.send(302);
+      server.sendHeader("Location", "http://192.168.4.1/", true);
+      server.send(302, "text/html", "");
+    }
+  });
+  
+  server.on("/gen_204", HTTP_GET, []() {
+    String ip = server.client().remoteIP().toString();
+    if (isAuthorized(ip)) {
+      server.send(204, "text/plain", "");
+    } else {
+      server.sendHeader("Location", "http://192.168.4.1/", true);
+      server.send(302, "text/html", "");
+    }
+  });
+  
+  server.on("/hotspot-detect.html", HTTP_GET, []() {
+    String ip = server.client().remoteIP().toString();
+    if (isAuthorized(ip)) {
+      server.send(200, "text/html", "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+    } else {
+      server.sendHeader("Location", "http://192.168.4.1/", true);
+      server.send(302, "text/html", "");
     }
   });
   
   server.onNotFound([]( ) {
     String ip = server.client().remoteIP().toString();
     if (isAuthorized(ip)) {
-      server.send(204);
+      server.send(204, "text/plain", "");
     } else {
-      server.sendHeader("Location", "/");
-      server.send(302);
+      server.sendHeader("Location", "http://192.168.4.1/", true);
+      server.send(302, "text/html", "");
     }
   });
   
   server.begin();
-  Serial.println("[HTTP] Server started");
+  Serial.println("[HTTP] Server started on port 80");
 }
 
-// ==================== PAGES ====================
+// ==================== HTML PAGES ====================
 void portalPage() {
-  String ip = server.client().remoteIP().toString();
-  if (isAuthorized(ip)) {
-    server.sendHeader("Location", "http://google.com");
-    server.send(302);
+  String clientIP = server.client().remoteIP().toString();
+  if (isAuthorized(clientIP)) {
+    server.sendHeader("Location", "http://google.com", true);
+    server.send(302, "text/html", "Redirecting...");
     return;
   }
   
-  String html = "<!DOCTYPE html><html><head>"
-    "<meta charset='UTF-8'><meta name='viewport' content='width=device-width'>"
-    "<title>Bushiri WiFi</title>"
-    "<style>body{text-align:center;padding:50px;background:#111;color:#fff;}"
-    "h1{color:#f00;font-size:2em;} button{padding:15px;font-size:1.2em;}</style>"
-    "</head><body><h1>📶 BUSHIRI WiFi</h1>"
-    "<p>TZS 800 = 15 Hours</p>"
-    "<p>MIXX: 0717633805</p>"
-    "<a href='/pay'><button style='background:#f00;color:#fff;border:none;border-radius:10px;cursor:pointer;'>"
-    "💰 Lipa Sasa</button></a></body></html>";
-    
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bushiri WiFi</title>
+<style>
+body { font-family: Arial; text-align: center; padding: 50px; background: #111; color: #fff; }
+h1 { color: #f00; font-size: 2.5em; }
+p { font-size: 1.2em; margin: 20px 0; }
+button { padding: 20px 40px; font-size: 1.5em; background: #f00; color: #fff; border: none; border-radius: 10px; cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>📶 Bushiri WiFi</h1>
+<p>TZS 800 = 15 Hours Internet</p>
+<p>💳 MIXX: )rawliteral" + String(MIXX_NUMBER) + R"rawliteral(</p>
+<a href="/pay"><button>💰 Lipa Sasa</button></a>
+<p style="font-size: 0.8em; margin-top: 30px; color: #ccc;">
+Test TXID: TEST123 (1 minute free)
+</p>
+</body>
+</html>
+)rawliteral";
+  
   server.send(200, "text/html", html);
 }
 
 void paymentPage() {
-  String html = "<!DOCTYPE html><html><head>"
-    "<meta charset='UTF-8'><meta name='viewport' content='width=device-width'>"
-    "<title>Payment</title></head><body style='text-align:center;padding:50px;background:#111;color:#fff;'>"
-    "<h2>✅ Thibitisha Malipo</h2>"
-    "<form method='POST' action='/verify' style='max-width:300px;margin:0 auto;'>"
-    "<input name='txid' placeholder='TXID number' style='width:100%;padding:12px;margin:10px 0;font-size:16px;'><br>"
-    "<input name='phone' placeholder='Phone' style='width:100%;padding:12px;margin:10px 0;font-size:16px;'><br>"
-    "<button style='width:100%;padding:15px;background:#0f0;color:#000;font-size:18px;border:none;border-radius:10px;cursor:pointer;'>"
-    "🚀 Verify & Connect</button></form>"
-    "<p><a href='/' style='color:#0ff;'>← Back</a></p></body></html>";
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Payment - Bushiri</title>
+</head>
+<body style="text-align:center; padding:50px; background:#111; color:#fff; font-family:Arial;">
+<h2>✅ Thibitisha Malipo</h2>
+<p style="font-size:1.1em;">Weka TXID kutoka SMS ya MIXX</p>
+<form method="POST" action="/verify" style="max-width:350px; margin:0 auto;">
+<input name="txid" placeholder="TXID (k.m. 26205921931320)" style="width:100%; padding:15px; margin:10px 0; font-size:18px; border-radius:8px; border:1px solid #444; box-sizing:border-box;"><br>
+<input name="phone" placeholder="Phone (0717633805)" style="width:100%; padding:15px; margin:10px 0; font-size:18px; border-radius:8px; border:1px solid #444; box-sizing:border-box;"><br>
+<button type="submit" style="width:100%; padding:20px; background:#0f0; color:#000; font-size:20px; border:none; border-radius:10px; cursor:pointer; font-weight:bold;">🚀 Verify & Connect Internet</button>
+</form>
+<p><a href="/" style="color:#0ff; font-size:1.1em;">← Rudi Nyuma</a></p>
+</body>
+</html>
+)rawliteral";
   server.send(200, "text/html", html);
 }
 
 void handleVerify() {
   String txid = server.arg("txid");
+  String phone = server.arg("phone");
   String ip = server.client().remoteIP().toString();
   
-  Serial.println("Verify: " + txid + " from " + ip);
+  Serial.println("[VERIFY] TXID=" + txid + " IP=" + ip);
   
+  // Test mode
   if (txid == "TEST123") {
-    addSession(ip, 60000UL);
-    server.sendHeader("Location", "/success");
+    addSession(ip, 60000UL); // 1 minute
+    server.sendHeader("Location", "/success", true);
     server.send(302);
     return;
   }
   
   String message;
   if (verifyWithVPS(txid, ip, message)) {
-    server.sendHeader("Location", "/success");
+    server.sendHeader("Location", "/success", true);
   } else {
-    String html = "<h1>Error: " + message + "</h1><a href='/pay'>Retry</a>";
+    String html = "<!DOCTYPE html><html><body style='text-align:center;padding:50px;background:#111;color:#f00;'>"
+      "<h1>❌ " + message + "</h1>"
+      "<a href='/pay' style='color:#0ff;font-size:1.2em;'>Retry Payment</a>"
+      "</body></html>";
     server.send(200, "text/html", html);
   }
   server.send(302);
@@ -267,37 +332,60 @@ void handleVerify() {
 
 void successPage() {
   server.send(200, "text/html", 
-    "<h1>✅ Connected!</h1>"
-    "<script>setTimeout(()=>{window.location='http://google.com';},2000);</script>");
+    "<!DOCTYPE html><html><body style='text-align:center;padding:100px;background:#0f0;color:#000;'>"
+    "<h1>✅ Malipo Yamekubalika!</h1>"
+    "<h2>Internet imewashwa...</h2>"
+    "<script>setTimeout(function(){window.location='http://google.com';},3000);</script>"
+    "</body></html>");
 }
 
 void adminPanel() {
-  String html = "<h1>Bushiri Admin v" + String(VERSION) + "</h1>"
-    "<p>WiFi: " + (WiFi.status()==WL_CONNECTED ? WiFi.SSID() : "DOWN") + "</p>"
-    "<p>Clients: " + String(clientCount) + "</p>"
-    "<p>NAT: " + String(natEnabled ? "ON" : "OFF") + "</p>";
+  String html = "<h1>Bushiri Control Panel v" + String(VERSION) + "</h1>"
+    "<p><b>WiFi Status:</b> " + String(WiFi.status() == WL_CONNECTED ? "🟢 UP (" + WiFi.SSID() + ")" : "🔴 DOWN") + "</p>"
+    "<p><b>Clients:</b> " + String(clientCount) + "</p>"
+    "<p><b>NAT:</b> " + String(natEnabled ? "🟢 ON" : "🔴 OFF") + "</p>"
+    "<p><b>IP:</b> 192.168.4.1</p><hr>";
+    
+  html += "<h3>Active Sessions:</h3><ul>";
+  int active = 0;
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    if (sessions[i].active && millis() < sessions[i].expiry) {
+      html += "<li>" + sessions[i].ip + " (" + String((sessions[i].expiry - millis()) / 1000) + "s left)</li>";
+      active++;
+    }
+  }
+  if (!active) html += "<li>None</li>";
+  html += "</ul>";
+    
   server.send(200, "text/html", html);
 }
 
-// ==================== SETUP/LOOP ====================
+// ==================== SETUP ====================
 void setup() {
   Serial.begin(115200);
   delay(2000);
-  Serial.println("\n🚀 Bushiri v" VERSION);
+  Serial.println("\n🚀 BUSHIRI v" VERSION " - ESP32 3.3.8");
   
   prefs.begin("bushiri");
   
+  // AP + STA mode
   WiFi.mode(WIFI_AP_STA);
   
   IPAddress apIP(192, 168, 4, 1);
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
   WiFi.softAP(AP_SSID, AP_PASS);
+  Serial.println("[AP] Bushiri WiFi @ 192.168.4.1");
   
   connectToInternet();
-  if (WiFi.status() == WL_CONNECTED) enableNAT();
+  if (WiFi.status() == WL_CONNECTED) {
+    delay(2000);
+    enableNAT();
+  }
   
   dnsServer.start(53, "*", apIP);
   setupWebServer();
+  Serial.println("\n✅ READY!");
+  Serial.println("Admin: http://192.168.4.1/admin");
 }
 
 void loop() {
@@ -305,13 +393,6 @@ void loop() {
   server.handleClient();
   maintainWiFi();
   
-  if (millis() - lastHB > 30000) {
-    lastHB = millis();
-    clientCount = WiFi.softAPgetStationNum();
-    Serial.printf("[INFO] Clients: %d | WiFi: %s | NAT: %s\n",
-      clientCount,
-      WiFi.status() == WL_CONNECTED ? "UP" : "DOWN",
-      natEnabled ? "ON" : "OFF");
-  }
+  clientCount = WiFi.softAPgetStationNum();
   delay(10);
 }
