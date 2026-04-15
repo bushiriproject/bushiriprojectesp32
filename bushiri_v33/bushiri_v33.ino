@@ -3,24 +3,23 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <ArduinoJson.h>
-#include <ESP32httpUpdate.h>
+#include <Update.h>  // ✅ Built-in OTA - NO external library needed
 #include <esp_wifi.h>
 #include <lwip/napt.h>
 #include <lwip/inet.h>
 
 // === CONFIGURATION ===
-const char* ownerMAC = "bc:90:63:a2:32:83";  // SET YOUR MAC HERE (replace XX:XX:XX)
+const char* ownerMAC = "bc:90:63:a2:32:83";  // 🔧 SET YOUR MAC HERE
 const char* adminPassword = "Kibushi1";
 const char* apSSID = "BUSHIRI";
-const char* apPassword =";
+const char* apPassword = "12345678";
 
-const char* staSSID = "PASSWORD";     // CHANGE IN ADMIN
-const char* staPassword = "AMUDUH123"; // CHANGE IN ADMIN
+const char* staSSID = "YOUR_MODEM_SSID";     // CHANGE IN ADMIN
+const char* staPassword = "YOUR_MODEM_PASS";
 
 IPAddress AP_IP_ADDR(192, 168, 4, 1);
 IPAddress AP_GATEWAY(192, 168, 4, 1);
 IPAddress AP_SUBNET(255, 255, 255, 0);
-IPAddress DNS_IP(8, 8, 8, 8);
 
 // === GLOBAL STATE ===
 WebServer server(80);
@@ -94,7 +93,7 @@ const char portalPage[] PROGMEM = R"rawliteral(
         </div>
         <input type="text" id="txid" placeholder="Ingiza TXID yako (mfano: TEST123)" maxlength="20">
         <button onclick="verifyTXID()">Lipa na Ungana</button>
-        <button class="test123" onclick="verifyTXID('TEST123')">🧪 TEST - Dakika 5 BURE</button>
+        <button class="test123" onclick="verifyTXID('TEST123')">🧪 TEST - Dakika 2 BURE</button>
         <div id="status"></div>
         <div class="loading" id="loading"><div class="spinner"></div><p>Kinaangalia malipo...</p></div>
     </div>
@@ -162,7 +161,7 @@ const char adminPage[] PROGMEM = R"rawliteral(
     <div class="card">
         <h1>🔧 BUSHIRI Admin Panel</h1>
         <div class="stats">
-            <div class="stat"><strong id="totalClients">0</strong><br>Jamii ya wagonjwa</div>
+            <div class="stat"><strong id="totalClients">0</strong><br>Total Clients</div>
             <div class="stat"><strong id="onlineClients">0</strong><br>Online</div>
             <div class="stat"><strong id="wifiStatus"></strong><br>WiFi Modem</div>
         </div>
@@ -177,19 +176,17 @@ const char adminPage[] PROGMEM = R"rawliteral(
     </div>
     
     <div class="card">
-        <h2>👥 Wagonjwa Online</h2>
+        <h2>👥 Clients Online</h2>
         <table id="clientsTable">
-            <thead><tr><th>MAC</th><th>Status</th><th>Expired</th></tr></thead>
+            <thead><tr><th>MAC</th><th>Status</th><th>Expires</th></tr></thead>
             <tbody></tbody>
         </table>
-        <button onclick="clearAll()">🗑️ Futa Wote</button>
+        <button onclick="clearAll()">🗑️ Clear All</button>
     </div>
     
     <div class="card">
-        <h2>🔄 OTA Update</h2>
-        <p>URL ya firmware mpya:</p>
-        <input type="text" id="otaUrl" placeholder="https://your-server.com/firmware.bin" style="width: 70%;">
-        <button class="ota" onclick="doOTA()">🚀 Update Firmware</button>
+        <h2>🔄 OTA Update (Built-in)</h2>
+        <p>Go to <code>http://bushiri.local/update</code> for web OTA</p>
     </div>
 
     <script>
@@ -199,13 +196,13 @@ const char adminPage[] PROGMEM = R"rawliteral(
             
             document.getElementById('totalClients').textContent = data.total;
             document.getElementById('onlineClients').textContent = data.online;
-            document.getElementById('wifiStatus').textContent = data.wifi ? '✅ ' + data.wifiSSID : '❌ Hakuna';
+            document.getElementById('wifiStatus').textContent = data.wifi ? '✅ ' + data.wifiSSID : '❌ Offline';
             
             const tbody = document.querySelector('#clientsTable tbody');
             tbody.innerHTML = '';
             data.clients.forEach(c => {
                 const row = tbody.insertRow();
-                row.innerHTML = `<td>${c.mac}</td><td>${c.authorized ? (Date.now() > c.expiry ? '⏰ Imekwisha' : '✅ Online') : '❌ Hakuna malipo'}</td><td>${new Date(c.expiry).toLocaleString()}</td>`;
+                row.innerHTML = `<td>${c.mac}</td><td>${c.authorized ? (Date.now() > c.expiry ? '⏰ Expired' : '✅ Online') : '❌ No Payment'}</td><td>${new Date(c.expiry).toLocaleString()}</td>`;
             });
         }
         
@@ -227,13 +224,6 @@ const char adminPage[] PROGMEM = R"rawliteral(
             loadData();
         }
         
-        async function doOTA() {
-            const url = document.getElementById('otaUrl').value;
-            if (!url) return alert('Ingiza OTA URL');
-            if (!confirm('Una uhakika?')) return;
-            window.location.href = '/update?url=' + encodeURIComponent(url);
-        }
-        
         setInterval(loadData, 5000);
         loadData();
     </script>
@@ -252,26 +242,14 @@ void setupNAT() {
   }
 }
 
-void disableNAT() {
-  if (naptEnabled) {
-    ip_napt_disable();
-    Serial.println("❌ NAT disabled");
-    naptEnabled = false;
-  }
-}
-
 String getClientMAC() {
-  uint8_t mac[6];
-  WiFi.softAPgetStationNum();
-  WiFi.softAPgetStationList();
   wifi_sta_list_t sta_list;
   esp_wifi_ap_get_sta_list(&sta_list);
   if (sta_list.num > 0) {
-    for (int i = 0; i < 6; i++) {
-      mac[i] = sta_list.sta[i].mac[i];
-    }
     char macStr[18];
-    sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X", 
+            sta_list.sta[0].mac[0], sta_list.sta[0].mac[1], sta_list.sta[0].mac[2],
+            sta_list.sta[0].mac[3], sta_list.sta[0].mac[4], sta_list.sta[0].mac[5]);
     return String(macStr);
   }
   return "";
@@ -291,31 +269,31 @@ bool isAuthorized(String mac) {
 }
 
 void authorizeClient(String mac, String txid) {
+  // Update existing or add new
   for (int i = 0; i < clientCount; i++) {
     if (clients[i].mac == mac) {
       clients[i].authorized = true;
-      clients[i].expiry = millis() + (txid == "TEST123" ? 5 * 60 * 1000UL : 15 * 60 * 60 * 1000UL);
+      clients[i].expiry = millis() + (txid == "TEST123" ? 2 * 60 * 1000UL : 15 * 60 * 60 * 1000UL);  // ✅ 2min TEST
       return;
     }
   }
   if (clientCount < 50) {
     clients[clientCount].mac = mac;
     clients[clientCount].authorized = true;
-    clients[clientCount].expiry = millis() + (txid == "TEST123" ? 5 * 60 * 1000UL : 15 * 60 * 60 * 1000UL);
+    clients[clientCount].expiry = millis() + (txid == "TEST123" ? 2 * 60 * 1000UL : 15 * 60 * 60 * 1000UL);
     clientCount++;
   }
 }
 
 void handleCaptivePortal() {
   String mac = getClientMAC();
-  Serial.printf("Captive request from %s\n", mac.c_str());
+  Serial.printf("Captive from %s\n", mac.c_str());
   
   if (isOwnerMAC(mac) || isAuthorized(mac)) {
     server.sendHeader("Location", "http://www.google.com", true);
-    server.send(302, "text/plain", "");
+    server.send(302);
     return;
   }
-  
   server.send(200, "text/html", portalPage);
 }
 
@@ -329,35 +307,35 @@ void setup() {
   delay(1000);
   setupNAT();
   
-  // Captive portals
+  // Captive portals - ALL devices
   server.on("/generate_204", handleCaptivePortal);
   server.on("/gen_204", handleCaptivePortal);
   server.on("/hotspot-detect.html", handleCaptivePortal);
   server.on("/connecttest.txt", handleCaptivePortal);
   server.on("/fwlink", handleCaptivePortal);
+  server.on("/", handleCaptivePortal);
   
-  // Payment verification
+  // Payment verify
   server.on("/verify", []() {
     String txid = server.arg("txid");
     String mac = getClientMAC();
-    Serial.printf("Verify TXID %s for %s\n", txid.c_str(), mac.c_str());
+    Serial.printf("TXID %s → %s\n", txid.c_str(), mac.c_str());
     
     DynamicJsonDocument doc(1024);
     if (txid == "TEST123") {
       authorizeClient(mac, txid);
       doc["success"] = true;
-      doc["message"] = "TEST access granted - 5 minutes";
+      doc["message"] = "✅ TEST OK - 2 minutes";
     } else {
       doc["success"] = false;
-      doc["message"] = "Verify TEST123 or real TXID on VPS";
+      doc["message"] = "Use TEST123 or real TXID";
     }
-    
-    String response;
-    serializeJson(doc, response);
-    server.send(200, "application/json", response);
+    String resp;
+    serializeJson(doc, resp);
+    server.send(200, "application/json", resp);
   });
   
-  // Admin
+  // Admin panel
   server.on("/admin", []() {
     if (!server.authenticate("admin", adminPassword)) {
       return server.requestAuthentication();
@@ -366,63 +344,50 @@ void setup() {
   });
   
   server.on("/admin/data", []() {
-    if (!server.authenticate("admin", adminPassword)) return;
+    if (!server.authenticate("admin", adminPassword)) return server.requestAuthentication();
     
     DynamicJsonDocument doc(4096);
     doc["total"] = clientCount;
     doc["online"] = 0;
-    doc["wifi"] = wifiConnected ? currentSSID : "";
-    JsonArray clientsArray = doc.createNestedArray("clients");
+    doc["wifi"] = wifiConnected ? currentSSID.c_str() : "";
     
+    JsonArray arr = doc.createNestedArray("clients");
     for (int i = 0; i < clientCount; i++) {
-      DynamicJsonDocument clientDoc(512);
-      clientDoc["mac"] = clients[i].mac;
-      clientDoc["authorized"] = clients[i].authorized;
-      clientDoc["expiry"] = clients[i].expiry;
-      clientsArray.add(clientDoc);
-      
+      JsonObject client = arr.createNestedObject();
+      client["mac"] = clients[i].mac;
+      client["authorized"] = clients[i].authorized;
+      client["expiry"] = clients[i].expiry;
       if (clients[i].authorized && millis() < clients[i].expiry) doc["online"]++;
     }
     
-    String response;
-    serializeJson(doc, response);
-    server.send(200, "application/json", response);
+    String resp;
+    serializeJson(doc, resp);
+    server.send(200, "application/json", resp);
   });
   
-  server.on("/admin/wifi", []() {
-    if (!server.authenticate("admin", adminPassword)) return;
+  server.on("/admin/wifi", HTTP_POST, []() {
+    if (!server.authenticate("admin", adminPassword)) return server.requestAuthentication();
+    
     if (server.hasArg("plain")) {
-      DynamicJsonDocument doc(1024);
+      DynamicJsonDocument doc(512);
       deserializeJson(doc, server.arg("plain"));
       currentSSID = doc["ssid"].as<String>();
       currentPass = doc["pass"].as<String>();
       connectWiFi();
-      
-      server.send(200, "text/plain", "WiFi config saved: " + currentSSID);
+      server.send(200, "text/plain", "✅ WiFi saved: " + currentSSID);
     }
-  }, HTTP_POST, [](){}, [](){
-    server.send(200, "text/plain", "OK");
   });
   
-  server.on("/admin/clear", []() {
-    if (!server.authenticate("admin", adminPassword)) return;
+  server.on("/admin/clear", HTTP_POST, []() {
+    if (!server.authenticate("admin", adminPassword)) return server.requestAuthentication();
     clientCount = 0;
-    server.send(200, "text/plain", "All clients cleared");
-  }, HTTP_POST);
+    server.send(200, "text/plain", "✅ All clients cleared");
+  });
   
-  // OTA
-  server.on("/update", []() {
-    String url = server.arg("url");
-    if (url.length() > 0) {
-      Serial.println("Starting OTA from: " + url);
-      ESPhttpUpdate.rebootOnUpdate(false);
-      t_httpUpdate_return ret = ESPhttpUpdate.update(url);
-      if (ret == HTTP_UPDATE_OK) {
-        Serial.println("OTA done");
-        ESP.restart();
-      }
-    }
-    server.send(200, "text/html", adminPage);
+  // Built-in OTA endpoint
+  server.on("/update", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html", "<h1>OTA Update - POST firmware to this URL</h1><p>Use ArduinoOTA or curl</p>");
   });
   
   server.onNotFound(handleCaptivePortal);
@@ -430,22 +395,26 @@ void setup() {
   
   connectWiFi();
   MDNS.begin("bushiri");
+  Serial.println("🚀 BUSHIRI v4.2.1 READY - http://192.168.4.1/admin");
 }
 
 void loop() {
   server.handleClient();
   
-  // Cleanup expired
+  // Cleanup expired clients
   for (int i = 0; i < clientCount; i++) {
     if (clients[i].authorized && millis() > clients[i].expiry) {
       clients[i].authorized = false;
     }
   }
   
-  // WiFi reconnect
-  if (WiFi.status() != WL_CONNECTED && millis() % 30000 < 1000) {
-    connectWiFi();
+  // Auto reconnect WiFi
+  static unsigned long lastCheck = 0;
+  if (millis() - lastCheck > 30000) {
+    if (WiFi.status() != WL_CONNECTED) connectWiFi();
+    lastCheck = millis();
   }
+  
   delay(10);
 }
 
@@ -453,21 +422,19 @@ void connectWiFi() {
   WiFi.disconnect();
   delay(1000);
   WiFi.begin(currentSSID.c_str(), currentPass.c_str());
-  Serial.printf("Connecting to %s...\n", currentSSID.c_str());
+  Serial.print("📶 Connecting to " + currentSSID + "...");
   
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+  while (WiFi.status() != WL_CONNECTED && attempts++ < 20) {
     delay(500);
-    attempts++;
     Serial.print(".");
   }
   
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
-    Serial.println("\n✅ WiFi connected: " + WiFi.localIP().toString());
-    setupNAT();
+    Serial.println("\n✅ Connected: " + WiFi.localIP().toString());
   } else {
     wifiConnected = false;
-    Serial.println("\n❌ WiFi failed");
+    Serial.println("\n❌ Connection failed");
   }
 }
