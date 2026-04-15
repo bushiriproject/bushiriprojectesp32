@@ -147,7 +147,7 @@ void maintainWiFi() {
     natEnabled = false;
     Serial.println("[WiFi] Imekatika - inajaribu...");
     connectToInternet();
-   (WiFi.status() == WL_CONNECTED && hasInternet()) enableNAT();
+ if  (WiFi.status() == WL_CONNECTED && hasInternet()) enableNAT();
   }
 }
 
@@ -251,7 +251,15 @@ void setup() {
 }
 
 // ==================== LOOP ====================
-void loop() {
+void loop() {if (WiFi.status() != WL_CONNECTED || !hasInternet()) {
+  Serial.println("[WAN] reconnecting...");
+  connectToInternet();
+  delay(2000);
+
+  if (WiFi.status() == WL_CONNECTED && hasInternet()) {
+    enableNAT();
+  }
+}
   dnsServer.processNextRequest();
   server.handleClient();
 
@@ -663,11 +671,4 @@ void setupOTA() {
   }, []() {
     HTTPUpload& upload = server.upload();
     if      (upload.status == UPLOAD_FILE_START)  Update.begin(UPDATE_SIZE_UNKNOWN);
-    else if (upload.status == UPLOAD_FILE_WRITE)  Update.write(upload.buf, upload.currentSize);
-    else if (upload.status == UPLOAD_FILE_END)    Update.end(true);
-  });
-}
-bool hasInternet() {
-  WiFiClient client;
-  return client.connect("8.8.8.8", 53);
-}
+    else if (upload.status 
