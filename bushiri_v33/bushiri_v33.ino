@@ -12,8 +12,8 @@ const char* adminPassword = "Kibushi1";
 const char* apSSID = "BUSHIRI";
 const char* apPassword = "12345678";
 
-const char* staSSID = "YOUR_MODEM_SSID";
-const char* staPassword = "YOUR_MODEM_PASS";
+const char* staSSID = "PATAHUDUMA";
+const char* staPassword = "AMUDUH123";
 
 IPAddress AP_IP_ADDR(192, 168, 4, 1);
 IPAddress AP_GATEWAY(192, 168, 4, 1);
@@ -202,7 +202,7 @@ void setup() {
     
     DynamicJsonDocument doc(2048);
     doc["total"] = clientCount;
-    doc["online"] = 0;
+    doc["online"] = doc["online"].is<int>() ? doc["online"].as<int>() + 1 : 1;
     doc["wifi"] = wifiConnected ? currentSSID.c_str() : "";
     
     JsonArray clientsList = doc.createNestedArray("clients");
