@@ -190,36 +190,41 @@ void setup() {
   });
   
   // Admin
-  server.on("/admin", []() {
-    if (!server.authenticate("admin", adminPassword)) {
-      return server.requestAuthentication();
+server.on("/admin", []() {
+  if (!server.authenticate("admin", adminPassword)) {
+    return server.requestAuthentication();
+  }
+  server.send(200, "text/html", adminPage);
+});
+
+server.on("/admin/data", HTTP_GET, []() {
+  if (!server.authenticate("admin", adminPassword)) {
+    return server.requestAuthentication();
+  }
+
+  DynamicJsonDocument doc(2048);
+  doc["total"] = clientCount;
+
+  // hakikisha online inaanza 0 kisha ongeza
+  int onlineCount = doc["online"].is<int>() ? doc["online"].as<int>() : 0;
+  doc["online"] = onlineCount + 1;
+
+  doc["wifi"] = wifiConnected ? currentSSID.c_str() : "";
+
+  JsonArray clientsList = doc.createNestedArray("clients");
+  for (int i = 0; i < clientCount; i++) {
+    JsonObject c = clientsList.createNestedObject();
+    c["mac"] = clients[i].mac;
+    c["authorized"] = clients[i].authorized;
+    c["expiry"] = clients[i].expiry;
+
+    if (clients[i].authorized && millis() < clients[i].expiry) {
+      doc["online"] = doc["online"].as<int>() + 1;
     }
-    server.send(200, "text/html", adminPage);
-  });
-  
-  server.on("/admin/data", HTTP_GET, []() {
-    if (!server.authenticate("admin", adminPassword)) return server.requestAuthentication();
-    
-    DynamicJsonDocument doc(2048);
-doc["total"] = clientCount;
+  }
 
-// hakikisha online inaanza 0 kisha ongeza
-int onlineCount = doc["online"].is<int>() ? doc["online"].as<int>() : 0;
-doc["online"] = onlineCount + 1;
-
-doc["wifi"] = wifiConnected ? currentSSID.c_str() : "";
-    
-    JsonArray clientsList = doc.createNestedArray("clients");
-    for (int i = 0; i < clientCount; i++) {
-      JsonObject c = clientsList.createNestedObject();
-      c["mac"] = clients[i].mac;
-c["authorized"] = clients[i].authorized;
-c["expiry"] = clients[i].expiry;
-
-if (clients[i].authorized && millis() < clients[i].expiry) {
-    doc["online"] = doc["online"].as<int>() + 1;
-}
-    
+  server.send(200, "application/json", doc.as<String>());
+});
     String resp;
     serializeJson(doc, resp);
     server.send(200, "application/json", resp);
