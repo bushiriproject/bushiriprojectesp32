@@ -147,7 +147,7 @@ void maintainWiFi() {
     natEnabled = false;
     Serial.println("[WiFi] Imekatika - inajaribu...");
     connectToInternet();
-    if (WiFi.status() == WL_CONNECTED && hasInternet()) enableNAT();
+   (WiFi.status() == WL_CONNECTED && hasInternet()) enableNAT();
   }
 }
 
