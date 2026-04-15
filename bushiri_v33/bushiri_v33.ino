@@ -126,59 +126,53 @@ void enableNAT() {
 
   Serial.println("[NAT] Imewashwa - AP: " + apIP.toString());
 }
-// ==================== WIFI ===================
+// ==================== WIFI ====================
 
 bool hasInternet() {
   WiFiClient client;
-  client.setTimeout(1500);
   return client.connect("8.8.8.8", 53);
 }
 
-bool connectToInternet() {
+void connectToInternet() {
 
-  String ssid = prefs.getString("sta_ssid", "");
-  String pass = prefs.getString("sta_pass", "");
+  sta_ssid = prefs.getString("sta_ssid", "");
+  sta_pass = prefs.getString("sta_pass", "");
 
-  // ===== PRIMARY WIFI =====
-  if (ssid.length() > 0) {
-    Serial.println("[WiFi] Connecting: " + ssid);
+  if (sta_ssid.length() > 0) {
 
-    WiFi.begin(ssid.c_str(), pass.c_str());
+    Serial.print("[WiFi] Unganika: ");
+    Serial.println(sta_ssid);
 
-    for (int t = 0; t < 20; t++) {
+    WiFi.begin(sta_ssid.c_str(), sta_pass.c_str());
+
+    for (int t = 0; t < 20 && WiFi.status() != WL_CONNECTED; t++) {
       delay(500);
       Serial.print(".");
-
-      if (WiFi.status() == WL_CONNECTED) break;
     }
 
     if (WiFi.status() == WL_CONNECTED && hasInternet()) {
-      Serial.println("\n[WAN] Internet OK (Primary)");
-      return true;
+      Serial.println("\n[WAN] Internet OK");
+      return;
     }
 
-    Serial.println("\n[WiFi] Primary failed...");
+    Serial.println("\n[WiFi] Imeshindwa, jaribu backup...");
   }
 
-  // ===== BACKUP WIFI =====
-  Serial.println("[WiFi] Trying backup...");
+  Serial.print("[WiFi] Backup: ");
+  Serial.println(STA_SSID_ALT);
 
   WiFi.begin(STA_SSID_ALT, STA_PASS_ALT);
 
-  for (int t = 0; t < 20; t++) {
+  for (int t = 0; t < 20 && WiFi.status() != WL_CONNECTED; t++) {
     delay(500);
     Serial.print(".");
-
-    if (WiFi.status() == WL_CONNECTED) break;
   }
 
   if (WiFi.status() == WL_CONNECTED && hasInternet()) {
-    Serial.println("\n[WAN] Internet OK (Backup)");
-    return true;
+    Serial.println("\n[WiFi] Backup OK");
+  } else {
+    Serial.println("\n[WiFi] Hakuna internet");
   }
-
-  Serial.println("\n[WAN] No Internet available");
-  return false;
 }
 // ==================== MAINTAIN WIFI ====================
 void maintainWiFi() {
@@ -193,46 +187,30 @@ void maintainWiFi() {
   }
 }
 
-// ==================== SETUP ====================
+// ==================== SETUP ================
 void setup() {
   Serial.begin(115200);
   delay(2000);
 
-  Serial.println("\n==============================");
-  Serial.println("  BUSHIRI ROUTER STARTING...");
-  Serial.println("==============================");
-
   prefs.begin("bushiri");
 
-  // ===== AP + STA MODE =====
   WiFi.mode(WIFI_AP_STA);
 
   IPAddress apIP(192, 168, 4, 1);
-  IPAddress gateway(192, 168, 4, 1);
-  IPAddress subnet(255, 255, 255, 0);
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+  WiFi.softAP(AP_SSID, AP_PASS);
 
-  WiFi.softAPConfig(apIP, gateway, subnet);
+  connectToInternet();
 
-  // SAFE AP PASSWORD HANDLING
-  if (strlen(AP_PASS) >= 8) {
-    WiFi.softAP(AP_SSID, AP_PASS);
-  } else {
-    WiFi.softAP(AP_SSID); // open AP
-  }
-
-  delay(1000);
-
-  Serial.println("[AP] Started: " + String(AP_SSID));
-  Serial.println("[AP] IP: " + WiFi.softAPIP().toString());
-
-  // ===== CONNECT INTERNET =====
-  bool internetOK = connectToInternet();
-
-  // ===== NAT ONLY IF INTERNET EXISTS =====
-  if (WiFi.status() == WL_CONNECTED && internetOK && hasInternet()) {
+  if (WiFi.status() == WL_CONNECTED && hasInternet()) {
     enableNAT();
   }
 
+  dnsServer.start(53, "*", apIP);
+
+  setupWebServer();
+  setupOTA();
+}
   // ===== DNS CAPTIVE PORTAL =====
   dnsServer.start(53, "*", apIP);
 
@@ -244,28 +222,20 @@ void setup() {
 }
 
 // ==================== LOOP ====================
+
 void loop() {
 
-  // ===== WAN CHECK (SAFE) =====
-  if (WiFi.status() != WL_CONNECTED) {
-
+  if (WiFi.status() != WL_CONNECTED || !hasInternet()) {
     Serial.println("[WAN] reconnect...");
     connectToInternet();
 
     if (WiFi.status() == WL_CONNECTED && hasInternet()) {
-      if (!natEnabled) {
-        enableNAT();
-      }
+      enableNAT();
     }
   }
 
-  // ===== DNS CAPTIVE PORTAL =====
   dnsServer.processNextRequest();
-
-  // ===== WEB SERVER =====
   server.handleClient();
-
-  // ===== MAINTAIN SYSTEM =====
   maintainWiFi();
 
   delay(10);
