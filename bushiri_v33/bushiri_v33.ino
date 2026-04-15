@@ -213,10 +213,12 @@ doc["wifi"] = wifiConnected ? currentSSID.c_str() : "";
     for (int i = 0; i < clientCount; i++) {
       JsonObject c = clientsList.createNestedObject();
       c["mac"] = clients[i].mac;
-      c["authorized"] = clients[i].authorized;
-      c["expiry"] = clients[i].expiry;
-      if (clients[i].authorized && millis() < clients[i].expiry) doc["online"]++;
-    }
+c["authorized"] = clients[i].authorized;
+c["expiry"] = clients[i].expiry;
+
+if (clients[i].authorized && millis() < clients[i].expiry) {
+    doc["online"] = doc["online"].as<int>() + 1;
+}
     
     String resp;
     serializeJson(doc, resp);
