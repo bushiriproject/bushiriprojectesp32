@@ -202,7 +202,11 @@ void setup() {
     
     DynamicJsonDocument doc(2048);
 doc["total"] = clientCount;
-doc["online"] = doc["online"].is<int>() ? doc["online"].as<int>() + 1 : 1;
+
+// hakikisha online inaanza 0 kisha ongeza
+int onlineCount = doc["online"].is<int>() ? doc["online"].as<int>() : 0;
+doc["online"] = onlineCount + 1;
+
 doc["wifi"] = wifiConnected ? currentSSID.c_str() : "";
     
     JsonArray clientsList = doc.createNestedArray("clients");
