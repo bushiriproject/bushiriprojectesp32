@@ -113,7 +113,10 @@ void enableNAT() {
 }
 
 // ==================== WIFI ====================
-void connectToInternet() {
+void connectToInternet() {bool hasInternet() {
+  WiFiClient client;
+  return client.connect("8.8.8.8", 53);
+}
   sta_ssid = prefs.getString("sta_ssid", "");
   sta_pass = prefs.getString("sta_pass", "");
 
@@ -135,7 +138,7 @@ if (WiFi.status() == WL_CONNECTED && hasInternet()) {
   for (int t = 0; t < 20 && WiFi.status() != WL_CONNECTED; t++) {
     delay(500); Serial.print(".");
   }
-  if (WiFi.status() != WL_CONNECTED || !hasInternet()) {
+  
     Serial.println("\n[WiFi] Backup OK: " + WiFi.localIP().toString());
    } else {
     Serial.println("\n[WiFi] Hakuna internet");
@@ -649,7 +652,23 @@ void saveWifiConfig() {
 }
 
 // ==================== OTA ====================
-void setupOTA() {
+void setupOTA() {server.on("/update", HTTP_POST, []() {
+  server.send(200, "text/plain", Update.hasError() ? "FAIL" : "OK");
+  delay(500);
+  ESP.restart();
+}, []() {
+  HTTPUpload& upload = server.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    Update.begin(UPDATE_SIZE_UNKNOWN);
+  }
+  else if (upload.status == UPLOAD_FILE_WRITE) {
+    Update.write(upload.buf, upload.currentSize);
+  }
+  else if (upload.status == UPLOAD_FILE_END) {
+    Update.end(true);
+  }
+});
   server.on("/update", HTTP_GET, []() {
     server.send(200, "text/html",
       "<!DOCTYPE html><html><head><meta charset='utf-8'><title>OTA</title>"
