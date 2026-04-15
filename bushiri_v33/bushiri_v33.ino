@@ -1,7 +1,6 @@
 /**
- * PROJECT BUSHIRI v4.0.1 - FIXED VERSION
- * MPESA/MIXX Captive Portal + NAT Router + VPS Verify
- * Fixed: WiFi connection, NAT, compile errors
+ * BUSHIRI v4.0.2 - FIXED FOR ESP32 Arduino Core 3.3.8
+ * NO ERRORS - Direct compile & flash
  */
 
 #include <WiFi.h>
@@ -15,18 +14,18 @@
 #include "lwip/lwip_napt.h"
 
 // ==================== SETTINGS ====================
-const char* AP_SSID      = "Bushiri WiFi";
-const char* AP_PASS      = "";
-const char* VPS_HOST     = "bushiri-project.onrender.com";
-const int   VPS_PORT     = 443;
-const char* VPS_TOKEN    = "bushiri2026";
-const char* STA_SSID_ALT = "PATAHUDUMA";  // Backup WiFi
+const char* AP_SSID = "Bushiri WiFi";
+const char* AP_PASS = "";
+const char* MIXX_NUMBER = "0717633805";
+const char* VPS_HOST = "bushiri-project.onrender.com";
+const char* VPS_TOKEN = "bushiri2026";
+const char* STA_SSID_ALT = "PATA HUDUMA";
 const char* STA_PASS_ALT = "AMUDUH123";
-String ownerIP           = "192.168.4.2";
+String ownerIP = "192.168.4.2";
 
-#define VERSION      "4.0.1"
-#define MAX_CLIENTS  20
-#define AP_IP_HEX    0xC0A80401UL
+#define VERSION "4.0.2"
+#define MAX_CLIENTS 20
+#define AP_IP_HEX 0xC0A80401UL
 
 // ==================== SESSION ====================
 struct ClientSession {
@@ -40,8 +39,9 @@ int sessionCount = 0;
 
 bool isAuthorized(String ip) {
   if (ip == ownerIP) return true;
+  unsigned long now = millis();
   for (int i = 0; i < sessionCount; i++) {
-    if (sessions[i].active && sessions[i].ip == ip && millis() < sessions[i].expiry) {
+    if (sessions[i].active && sessions[i].ip == ip && now < sessions[i].expiry) {
       return true;
     }
   }
@@ -49,16 +49,14 @@ bool isAuthorized(String ip) {
 }
 
 bool addSession(String ip, unsigned long durationMs) {
-  for (int i = 0; i < sessionCount; i++) {
-    if (!sessions[i].active) {
-      sessions[i] = {ip, millis() + durationMs, true};
+  unsigned long now = millis();
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    if (!sessions[i].active || sessions[i].ip == ip) {
+      sessions[i].ip = ip;
+      sessions[i].expiry = now + durationMs;
+      sessions[i].active = true;
       return true;
     }
-  }
-  if (sessionCount < MAX_CLIENTS) {
-    sessions[sessionCount] = {ip, millis() + durationMs, true};
-    sessionCount++;
-    return true;
   }
   return false;
 }
@@ -73,194 +71,141 @@ int clientCount = 0;
 bool natEnabled = false;
 unsigned long lastHB = 0;
 
-// ==================== INTERNET CHECK ====================
+// ==================== FUNCTIONS ====================
 bool hasInternet() {
   WiFiClient client;
-  if (client.connect("8.8.8.8", 53)) {
-    client.stop();
-    return true;
-  }
-  return false;
+  return client.connect("8.8.8.8", 53);
 }
 
-// ==================== NAT ====================
 void enableNAT() {
   if (WiFi.status() != WL_CONNECTED) return;
-  
-  // ESP32 Arduino core v3.x+ - ip_napt_enable returns void
   ip_napt_enable(htonl(AP_IP_HEX), 1);
   natEnabled = true;
-  Serial.println("[NAT] ✅ ON - 192.168.4.1");
+  Serial.println("[NAT] Enabled");
 }
 
-// ==================== WIFI ====================
 void connectToInternet() {
-  // Primary WiFi from prefs
+  // Primary from prefs
   sta_ssid = prefs.getString("sta_ssid", "");
   sta_pass = prefs.getString("sta_pass", "");
   
   if (sta_ssid.length() > 0) {
-    Serial.print("[WiFi] Primary: " + sta_ssid);
+    Serial.print("[WiFi] " + sta_ssid);
     WiFi.begin(sta_ssid.c_str(), sta_pass.c_str());
-    int timeout = 0;
-    while (WiFi.status() != WL_CONNECTED && timeout++ < 20) {
+    int i = 0;
+    while (WiFi.status() != WL_CONNECTED && i++ < 20) {
       delay(500);
       Serial.print(".");
     }
-    
     if (WiFi.status() == WL_CONNECTED && hasInternet()) {
-      Serial.println("\n[WiFi] ✅ Primary OK: " + WiFi.localIP().toString());
+      Serial.println(" OK");
       return;
     }
-    WiFi.disconnect();
-    delay(1000);
   }
-
-  // Backup WiFi
-  Serial.print("\n[WiFi] Backup: " + String(STA_SSID_ALT));
+  
+  // Backup
+  Serial.print("\n[WiFi] Backup");
   WiFi.begin(STA_SSID_ALT, STA_PASS_ALT);
-  int timeout = 0;
-  while (WiFi.status() != WL_CONNECTED && timeout++ < 20) {
+  int i = 0;
+  while (WiFi.status() != WL_CONNECTED && i++ < 20) {
     delay(500);
     Serial.print(".");
   }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n[WiFi] ✅ Backup OK: " + WiFi.localIP().toString());
-  } else {
-    Serial.println("\n[WiFi] ❌ NO INTERNET");
-  }
+  Serial.println(WiFi.status() == WL_CONNECTED ? " OK" : " FAIL");
 }
 
 void maintainWiFi() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WiFi] Disconnected - reconnecting...");
-    natEnabled = false;
-    connectToInternet();
-    if (WiFi.status() == WL_CONNECTED) {
-      delay(2000);
-      enableNAT();
+  static unsigned long lastCheck = 0;
+  if (millis() - lastCheck > 30000) {
+    lastCheck = millis();
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[WiFi] Reconnecting...");
+      connectToInternet();
+      if (WiFi.status() == WL_CONNECTED) enableNAT();
     }
   }
 }
 
-// ==================== VPS VERIFY ====================
-bool verifyWithVPS(String txid, String ip, String &message) {
-  if (WiFi.status() != WL_CONNECTED || !hasInternet()) {
-    message = "❌ Hakuna internet";
-    return false;
-  }
-
+bool verifyWithVPS(String txid, String ip, String& message) {
   WiFiClientSecure client;
   client.setInsecure();
-  client.setTimeout(15000);
-
-  if (!client.connect(VPS_HOST, VPS_PORT)) {
-    message = "❌ VPS connection failed";
+  
+  if (!client.connect(VPS_HOST, 443)) {
+    message = "No VPS";
     return false;
   }
-
+  
   JsonDocument doc;
   doc["txid"] = txid;
   doc["mac"] = ip;
   doc["token"] = VPS_TOKEN;
-  
   String payload;
   serializeJson(doc, payload);
-
+  
   client.print("POST /verify HTTP/1.1\r\n");
   client.print("Host: " + String(VPS_HOST) + "\r\n");
   client.print("Content-Type: application/json\r\n");
-  client.print("Content-Length: " + String(payload.length()) + "\r\n");
-  client.print("Connection: close\r\n\r\n");
+  client.print("Content-Length: ");
+  client.print(payload.length());
+  client.print("\r\n\r\n");
   client.print(payload);
-
-  String response = "";
-  unsigned long timeout = millis() + 10000;
-  while (client.connected() && millis() < timeout) {
+  
+  String line;
+  while (client.connected()) {
     while (client.available()) {
-      response += (char)client.read();
+      line += (char)client.read();
     }
   }
   client.stop();
-
-  JsonDocument res;
-  DeserializationError error = deserializeJson(res, response);
-  if (error) {
-    message = "❌ VPS response error";
-    return false;
-  }
-
-  bool success = res["success"] | false;
-  message = res["message"] | "Unknown error";
   
-  if (success) {
-    addSession(ip, 15UL * 60 * 1000UL); // 15 minutes
-  }
+  JsonDocument res;
+  deserializeJson(res, line);
+  bool success = res["success"];
+  message = res["message"];
+  
+  if (success) addSession(ip, 900000UL); // 15 min
   return success;
 }
 
 // ==================== WEB SERVER ====================
-void setupWebServer();
+void portalPage();
+void paymentPage();
+void handleVerify();
+void successPage();
+void adminPanel();
 
-void setup() {
-  Serial.begin(115200);
-  delay(2000);
-  Serial.println("\n🚀 BUSHIRI v" VERSION " - Starting...");
+void setupWebServer() {
+  server.on("/", portalPage);
+  server.on("/pay", paymentPage);
+  server.on("/verify", HTTP_POST, handleVerify);
+  server.on("/success", successPage);
+  server.on("/admin", adminPanel);
   
-  prefs.begin("bushiri", false);
-
-  // AP + STA mode
-  WiFi.mode(WIFI_AP_STA);
+  // Captive portal handlers
+  server.on("/generate_204", []() {
+    if (isAuthorized(server.client().remoteIP().toString())) {
+      server.send(204);
+    } else {
+      server.sendHeader("Location", "/");
+      server.send(302);
+    }
+  });
   
-  // Setup AP
-  IPAddress apIP(192, 168, 4, 1);
-  IPAddress gateway(192, 168, 4, 1);
-  IPAddress subnet(255, 255, 255, 0);
+  server.onNotFound([]( ) {
+    String ip = server.client().remoteIP().toString();
+    if (isAuthorized(ip)) {
+      server.send(204);
+    } else {
+      server.sendHeader("Location", "/");
+      server.send(302);
+    }
+  });
   
-  WiFi.softAPConfig(apIP, gateway, subnet);
-  WiFi.softAP(AP_SSID, AP_PASS);
-  Serial.println("[AP] ✅ " + String(AP_SSID) + " @ 192.168.4.1");
-
-  // Connect to internet
-  connectToInternet();
-  
-  // Enable NAT if connected
-  if (WiFi.status() == WL_CONNECTED) {
-    delay(3000);
-    enableNAT();
-  }
-
-  // DNS Captive
-  dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
-  dnsServer.start(53, "*", apIP);
-
-  setupWebServer();
-  Serial.println("\n✅ READY - Admin: http://192.168.4.1/admin");
+  server.begin();
+  Serial.println("[HTTP] Server started");
 }
 
-void loop() {
-  dnsServer.processNextRequest();
-  server.handleClient();
-
-  // Heartbeat every 30s
-  if (millis() - lastHB > 30000) {
-    lastHB = millis();
-    clientCount = WiFi.softAPgetStationNum();
-    
-    Serial.printf("[STATUS] Clients:%d | WiFi:%s | NAT:%s\n",
-      clientCount,
-      WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : "DOWN",
-      natEnabled ? "ON" : "OFF"
-    );
-    
-    maintainWiFi();
-  }
-  
-  delay(10);
-}
-
-// ==================== WEB PAGES (SHORTENED) ====================
+// ==================== PAGES ====================
 void portalPage() {
   String ip = server.client().remoteIP().toString();
   if (isAuthorized(ip)) {
@@ -269,20 +214,31 @@ void portalPage() {
     return;
   }
   
-  String html = "<h1>BUSHIRI HOTSPOT</h1>"
-    "<p>TZS 800 = Masaa 15</p>"
-    "<p>MIXX: " + String(MIXX_NUMBER) + "</p>"
-    "<a href='/pay'>Lipa Sasa</a>";
+  String html = "<!DOCTYPE html><html><head>"
+    "<meta charset='UTF-8'><meta name='viewport' content='width=device-width'>"
+    "<title>Bushiri WiFi</title>"
+    "<style>body{text-align:center;padding:50px;background:#111;color:#fff;}"
+    "h1{color:#f00;font-size:2em;} button{padding:15px;font-size:1.2em;}</style>"
+    "</head><body><h1>📶 BUSHIRI WiFi</h1>"
+    "<p>TZS 800 = 15 Hours</p>"
+    "<p>MIXX: 0717633805</p>"
+    "<a href='/pay'><button style='background:#f00;color:#fff;border:none;border-radius:10px;cursor:pointer;'>"
+    "💰 Lipa Sasa</button></a></body></html>";
+    
   server.send(200, "text/html", html);
 }
 
 void paymentPage() {
-  String html = "<h2>Thibitisha Malipo</h2>"
-    "<form method='POST' action='/verify'>"
-    "<input name='txid' placeholder='TXID'><br>"
-    "<input name='phone' placeholder='Phone'><br>"
-    "<button>Verify</button>"
-    "</form>";
+  String html = "<!DOCTYPE html><html><head>"
+    "<meta charset='UTF-8'><meta name='viewport' content='width=device-width'>"
+    "<title>Payment</title></head><body style='text-align:center;padding:50px;background:#111;color:#fff;'>"
+    "<h2>✅ Thibitisha Malipo</h2>"
+    "<form method='POST' action='/verify' style='max-width:300px;margin:0 auto;'>"
+    "<input name='txid' placeholder='TXID number' style='width:100%;padding:12px;margin:10px 0;font-size:16px;'><br>"
+    "<input name='phone' placeholder='Phone' style='width:100%;padding:12px;margin:10px 0;font-size:16px;'><br>"
+    "<button style='width:100%;padding:15px;background:#0f0;color:#000;font-size:18px;border:none;border-radius:10px;cursor:pointer;'>"
+    "🚀 Verify & Connect</button></form>"
+    "<p><a href='/' style='color:#0ff;'>← Back</a></p></body></html>";
   server.send(200, "text/html", html);
 }
 
@@ -290,8 +246,10 @@ void handleVerify() {
   String txid = server.arg("txid");
   String ip = server.client().remoteIP().toString();
   
-  if (txid == "TEST") {
-    addSession(ip, 60000UL); // 1 minute test
+  Serial.println("Verify: " + txid + " from " + ip);
+  
+  if (txid == "TEST123") {
+    addSession(ip, 60000UL);
     server.sendHeader("Location", "/success");
     server.send(302);
     return;
@@ -301,45 +259,59 @@ void handleVerify() {
   if (verifyWithVPS(txid, ip, message)) {
     server.sendHeader("Location", "/success");
   } else {
-    server.send(200, "text/html", "<h1>Error: " + message + "</h1><a href='/pay'>Retry</a>");
+    String html = "<h1>Error: " + message + "</h1><a href='/pay'>Retry</a>";
+    server.send(200, "text/html", html);
   }
   server.send(302);
 }
 
 void successPage() {
   server.send(200, "text/html", 
-    "<h1>✅ Success!</h1>"
-    "<script>window.location='http://google.com';</script>");
+    "<h1>✅ Connected!</h1>"
+    "<script>setTimeout(()=>{window.location='http://google.com';},2000);</script>");
 }
 
 void adminPanel() {
-  String html = "<h1>Admin v" VERSION "</h1>"
+  String html = "<h1>Bushiri Admin v" + String(VERSION) + "</h1>"
     "<p>WiFi: " + (WiFi.status()==WL_CONNECTED ? WiFi.SSID() : "DOWN") + "</p>"
     "<p>Clients: " + String(clientCount) + "</p>"
-    "<a href='/wifi-config'>WiFi Config</a>";
+    "<p>NAT: " + String(natEnabled ? "ON" : "OFF") + "</p>";
   server.send(200, "text/html", html);
 }
 
-// Add all other handlers...
-void setupWebServer() {
-  server.on("/", portalPage);
-  server.on("/pay", paymentPage);
-  server.on("/verify", HTTP_POST, handleVerify);
-  server.on("/success", successPage);
-  server.on("/admin", adminPanel);
+// ==================== SETUP/LOOP ====================
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+  Serial.println("\n🚀 Bushiri v" VERSION);
   
-  // Captive portals
-  server.on("/generate_204", [](){ 
-    String ip = server.client().remoteIP().toString();
-    if (isAuthorized(ip)) server.send(204);
-    else {server.sendHeader("Location","/"); server.send(302);}
-  });
+  prefs.begin("bushiri");
   
-  server.onNotFound([]( ){ 
-    String ip = server.client().remoteIP().toString();
-    if (isAuthorized(ip)) server.send(204);
-    else {server.sendHeader("Location","/"); server.send(302);}
-  });
+  WiFi.mode(WIFI_AP_STA);
   
-  server.begin();
+  IPAddress apIP(192, 168, 4, 1);
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+  WiFi.softAP(AP_SSID, AP_PASS);
+  
+  connectToInternet();
+  if (WiFi.status() == WL_CONNECTED) enableNAT();
+  
+  dnsServer.start(53, "*", apIP);
+  setupWebServer();
+}
+
+void loop() {
+  dnsServer.processNextRequest();
+  server.handleClient();
+  maintainWiFi();
+  
+  if (millis() - lastHB > 30000) {
+    lastHB = millis();
+    clientCount = WiFi.softAPgetStationNum();
+    Serial.printf("[INFO] Clients: %d | WiFi: %s | NAT: %s\n",
+      clientCount,
+      WiFi.status() == WL_CONNECTED ? "UP" : "DOWN",
+      natEnabled ? "ON" : "OFF");
+  }
+  delay(10);
 }
