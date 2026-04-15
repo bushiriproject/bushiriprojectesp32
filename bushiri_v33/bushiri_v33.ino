@@ -104,56 +104,82 @@ void maintainWiFi();
 String getClientIP();
 
 // ==================== NAT ====================
-// NOTA: ip_napt_enable() katika core v3.x inarudisha void — usijaribu kukamata return value
-void enableNAT() {
-  delay(500);
-  ip_napt_enable(htonl(AP_IP_HEX), 1);
-  natEnabled = true;
-  Serial.println("[NAT] Imewashwa - 192.168.4.1");
-}
+// Enable NAT only when STA is connected
 
+void enableNAT() {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[NAT] STA haijaunganishwa - NAT imezuiwa");
+    natEnabled = false;
+    return;
+  }
+
+  delay(500);
+
+  // Convert AP IP to correct format
+  IPAddress apIP = WiFi.softAPIP();
+
+  // ESP32 NAT enable (NAPT)
+  ip_napt_enable(htonl((uint32_t)apIP), 1);
+
+  natEnabled = true;
+
+  Serial.println("[NAT] Imewashwa - AP: " + apIP.toString());
+}
 // ==================== WIFI ===================
+
 bool hasInternet() {
   WiFiClient client;
+  client.setTimeout(1500);
   return client.connect("8.8.8.8", 53);
 }
 
-void connectToInternet() {
+bool connectToInternet() {
 
-  sta_ssid = prefs.getString("sta_ssid", "");
-  sta_pass = prefs.getString("sta_pass", "");
+  String ssid = prefs.getString("sta_ssid", "");
+  String pass = prefs.getString("sta_pass", "");
 
-  if (sta_ssid.length() > 0) {
-    Serial.print("[WiFi] Unganika: " + sta_ssid);
-    WiFi.begin(sta_ssid.c_str(), sta_pass.c_str());
+  // ===== PRIMARY WIFI =====
+  if (ssid.length() > 0) {
+    Serial.println("[WiFi] Connecting: " + ssid);
 
-    for (int t = 0; t < 20 && WiFi.status() != WL_CONNECTED; t++) {
-      delay(500); Serial.print(".");
+    WiFi.begin(ssid.c_str(), pass.c_str());
+
+    for (int t = 0; t < 20; t++) {
+      delay(500);
+      Serial.print(".");
+
+      if (WiFi.status() == WL_CONNECTED) break;
     }
 
     if (WiFi.status() == WL_CONNECTED && hasInternet()) {
-      Serial.println("\n[WAN] Internet OK");
-      return;
+      Serial.println("\n[WAN] Internet OK (Primary)");
+      return true;
     }
 
-    Serial.println("\n[WiFi] Imeshindwa, jaribu backup...");
+    Serial.println("\n[WiFi] Primary failed...");
   }
 
-  Serial.print("[WiFi] Backup: " + String(STA_SSID_ALT));
+  // ===== BACKUP WIFI =====
+  Serial.println("[WiFi] Trying backup...");
+
   WiFi.begin(STA_SSID_ALT, STA_PASS_ALT);
 
-  for (int t = 0; t < 20 && WiFi.status() != WL_CONNECTED; t++) {
-    delay(500); Serial.print(".");
+  for (int t = 0; t < 20; t++) {
+    delay(500);
+    Serial.print(".");
+
+    if (WiFi.status() == WL_CONNECTED) break;
   }
 
   if (WiFi.status() == WL_CONNECTED && hasInternet()) {
-    Serial.println("\n[WiFi] Backup OK: " + WiFi.localIP().toString());
-  } else {
-    Serial.println("\n[WiFi] Hakuna internet");
+    Serial.println("\n[WAN] Internet OK (Backup)");
+    return true;
   }
+
+  Serial.println("\n[WAN] No Internet available");
+  return false;
 }
-
-
 // ==================== MAINTAIN WIFI ====================
 void maintainWiFi() {
   if (WiFi.status() != WL_CONNECTED || !hasInternet()) {
@@ -167,48 +193,79 @@ void maintainWiFi() {
   }
 }
 
-
 // ==================== SETUP ====================
 void setup() {
   Serial.begin(115200);
   delay(2000);
 
+  Serial.println("\n==============================");
+  Serial.println("  BUSHIRI ROUTER STARTING...");
+  Serial.println("==============================");
+
   prefs.begin("bushiri");
 
+  // ===== AP + STA MODE =====
   WiFi.mode(WIFI_AP_STA);
 
   IPAddress apIP(192, 168, 4, 1);
-  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-  WiFi.softAP(AP_SSID, AP_PASS);
+  IPAddress gateway(192, 168, 4, 1);
+  IPAddress subnet(255, 255, 255, 0);
 
-  connectToInternet();
+  WiFi.softAPConfig(apIP, gateway, subnet);
 
-  if (WiFi.status() == WL_CONNECTED && hasInternet()) {
+  // SAFE AP PASSWORD HANDLING
+  if (strlen(AP_PASS) >= 8) {
+    WiFi.softAP(AP_SSID, AP_PASS);
+  } else {
+    WiFi.softAP(AP_SSID); // open AP
+  }
+
+  delay(1000);
+
+  Serial.println("[AP] Started: " + String(AP_SSID));
+  Serial.println("[AP] IP: " + WiFi.softAPIP().toString());
+
+  // ===== CONNECT INTERNET =====
+  bool internetOK = connectToInternet();
+
+  // ===== NAT ONLY IF INTERNET EXISTS =====
+  if (WiFi.status() == WL_CONNECTED && internetOK && hasInternet()) {
     enableNAT();
   }
 
+  // ===== DNS CAPTIVE PORTAL =====
   dnsServer.start(53, "*", apIP);
 
+  // ===== SERVICES =====
   setupWebServer();
   setupOTA();
-}
 
+  Serial.println("[READY] Router active");
+}
 
 // ==================== LOOP ====================
 void loop() {
 
-  if (WiFi.status() != WL_CONNECTED || !hasInternet()) {
+  // ===== WAN CHECK (SAFE) =====
+  if (WiFi.status() != WL_CONNECTED) {
+
     Serial.println("[WAN] reconnect...");
     connectToInternet();
 
     if (WiFi.status() == WL_CONNECTED && hasInternet()) {
-      enableNAT();
+      if (!natEnabled) {
+        enableNAT();
+      }
     }
   }
 
+  // ===== DNS CAPTIVE PORTAL =====
   dnsServer.processNextRequest();
+
+  // ===== WEB SERVER =====
   server.handleClient();
 
+  // ===== MAINTAIN SYSTEM =====
   maintainWiFi();
 
   delay(10);
@@ -570,42 +627,62 @@ void saveWifiConfig() {
 }
 
 // ==================== OTA ====================
-void setupOTA() {server.on("/update", HTTP_POST, []() {
-  server.send(200, "text/plain", Update.hasError() ? "FAIL" : "OK");
-  delay(500);
-  ESP.restart();
-}, []() {
-  HTTPUpload& upload = server.upload();
+void setupOTA() {
 
-  if (upload.status == UPLOAD_FILE_START) {
-    Update.begin(UPDATE_SIZE_UNKNOWN);
-  }
-  else if (upload.status == UPLOAD_FILE_WRITE) {
-    Update.write(upload.buf, upload.currentSize);
-  }
-  else if (upload.status == UPLOAD_FILE_END) {
-    Update.end(true);
-  }
-});
+  // ===== OTA UPLOAD PAGE =====
   server.on("/update", HTTP_GET, []() {
+
     server.send(200, "text/html",
       "<!DOCTYPE html><html><head><meta charset='utf-8'><title>OTA</title>"
-      "<style>body{background:#111;color:#fff;font-family:monospace;padding:30px;text-align:center}"
+      "<style>"
+      "body{background:#111;color:#fff;font-family:monospace;padding:30px;text-align:center}"
       "input,button{padding:12px;margin:10px;border-radius:8px;font-size:15px}"
       "button{background:#e91e63;color:white;border:none;cursor:pointer;width:200px}"
-      "a{color:#e91e63}</style></head><body>"
+      "a{color:#e91e63}"
+      "</style></head><body>"
       "<h2>🔄 OTA Firmware Update</h2>"
       "<form method='POST' action='/update' enctype='multipart/form-data'>"
       "<input type='file' name='update' accept='.bin'><br>"
-      "<button type='submit'>Upload</button></form>"
-      "<br><a href='/admin'>← Admin</a></body></html>");
+      "<button type='submit'>Upload</button>"
+      "</form>"
+      "<br><a href='/admin'>← Admin</a>"
+      "</body></html>"
+    );
   });
 
-  server.on("/update", HTTP_POST, []() {
-    server.send(200, "text/plain", Update.hasError() ? "FAIL" : "OK");
-    delay(500);
-    ESP.restart();
-  }, []() {
-    HTTPUpload& upload = server.upload();
-    if      (upload.status == UPLOAD_FILE_START)  Update.begin(UPDATE_SIZE_UNKNOWN);
-    else if (upload.status 
+  // ===== OTA UPLOAD HANDLER =====
+  server.on("/update", HTTP_POST,
+    // after upload finishes
+    []() {
+      server.send(200, "text/plain", Update.hasError() ? "FAIL" : "OK");
+      delay(500);
+      ESP.restart();
+    },
+
+    // upload stream handler
+    []() {
+      HTTPUpload& upload = server.upload();
+
+      if (upload.status == UPLOAD_FILE_START) {
+        Serial.println("[OTA] Start");
+        Update.begin(UPDATE_SIZE_UNKNOWN);
+      }
+
+      else if (upload.status == UPLOAD_FILE_WRITE) {
+        Update.write(upload.buf, upload.currentSize);
+      }
+
+      else if (upload.status == UPLOAD_FILE_END) {
+        Update.end(true);
+        Serial.println("[OTA] Done");
+      }
+
+      else if (upload.status == UPLOAD_FILE_ABORTED) {
+        Update.end();
+        Serial.println("[OTA] Aborted");
+      }
+    }
+  );
+
+  server.begin();
+} 
