@@ -40,7 +40,7 @@ struct ClientSession {
 };
 ClientSession sessions[50];
 
-// 🔥 BEAUTIFUL CAPTIVE PORTAL WITH FULL PAYMENT INFO
+// 🔥 BEAUTIFUL CAPTIVE PORTAL - FULL PAYMENT INFO
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -177,29 +177,23 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  // AP + STA Mode
   WiFi.mode(WIFI_AP_STA);
   
-  // AP Config
   IPAddress gateway(192, 168, 4, 1);
   IPAddress subnet(255, 255, 255, 0);
   WiFi.softAPConfig(AP_IP, gateway, subnet);
   WiFi.softAP(AP_SSID, AP_PASS);
   
-  // DNS Captive Portal
   dnsServer.start(53, "*", AP_IP);
   
-  // Web Routes
-  server.on("/", HTTP_GET, [](){ server.send_P(200, "text/html", index_html); });
-  server.on("/generate_204", HTTP_GET, [](){ server.send_P(200, "text/html", index_html); });
-  server.on("/fwlink", HTTP_GET, [](){ server.send_P(200, "text/html", index_html); });
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/generate_204", HTTP_GET, handleRoot);
+  server.on("/fwlink", HTTP_GET, handleRoot);
   server.on("/api/validate", HTTP_GET, handleValidate);
   server.on("/internet", HTTP_GET, handleInternetRedirect);
   server.on("/admin", HTTP_GET, handleAdmin);
-  server.on("/vps-report", HTTP_POST, handleVPSReport);
   server.begin();
   
-  // Connect to Modem
   connectModem();
   
   Serial.println("🚀 BUSHIRI PROJECT v3.3.8 READY");
@@ -211,7 +205,6 @@ void loop() {
   dnsServer.processNextRequest();
   server.handleClient();
   
-  // Maintain internet connection
   static unsigned long lastCheck = 0;
   if (millis() - lastCheck > 30000) {
     checkInternet();
@@ -219,44 +212,10 @@ void loop() {
     cleanupExpiredSessions();
     lastCheck = millis();
   }
-  
-  // INTERNET FORWARDING - CRITICAL
-  handleInternetForwarding();
 }
 
-// 🔥 INTERNET FORWARDING ENGINE
-void handleInternetForwarding() {
-  static WiFiClient apClient;
-  static WiFiClient modemClient;
-  
-  // Check AP clients
-  if (!apClient) {
-    apClient = server.available();
-  }
-  
-  if (apClient && apClient.connected()) {
-    IPAddress clientIP = apClient.remoteIP();
-    if (isClientAuthorized(clientIP.toString()) && internetConnected) {
-      
-      // Forward AP client -> Modem
-      if (apClient.available()) {
-        uint8_t buffer[1460];
-        int len = apClient.read(buffer, sizeof(buffer));
-        if (len > 0) {
-          // Send to modem internet
-          WiFiClient modemOut;
-          if (modemOut.connect(WiFi.gatewayIP(), 80)) {
-            modemOut.write(buffer, len);
-          }
-        }
-      }
-    }
-  }
-  
-  // Cleanup disconnected clients
-  if (apClient && !apClient.connected()) {
-    apClient.stop();
-  }
+void handleRoot() {
+  server.send_P(200, "text/html", index_html);
 }
 
 void handleValidate() {
@@ -264,197 +223,231 @@ void handleValidate() {
   IPAddress clientIP = server.client().remoteIP();
   String clientIPStr = clientIP.toString();
   
-  Serial.println("Validate: " + txid + " from " + clientIPStr);
+  Serial.println("Validate TXID: " + txid + " IP: " + clientIPStr);
   
-  // Owner MAC check (demo IP based)
+  // Owner free access
   if (clientIPStr == "192.168.4.2") {
-    authorizeClient(clientIPStr, "OWNER", 31536000000UL); // 1 year
-    server.send(200, "application/json", "{\"valid\":true,\"message\":\"Owner access\"}");
+    authorizeClient(clientIPStr, "OWNER_FREE", 31536000000UL);
+    server.send(200, "application/json", "{\"valid\":true,\"message\":\"Owner access granted\"}");
     return;
   }
   
-  // TEST123 - 2 minutes free
+  // FREE TEST123
   if (txid == TEST_CODE) {
     authorizeClient(clientIPStr, TEST_CODE, 120000UL);
-    server.send(200, "application/json", "{\"valid\":true,\"message\":\"2min FREE test!\"}");
+    server.send(200, "application/json", "{\"valid\":true,\"message\":\"2min FREE test activated!\"}");
     return;
   }
   
-  // VPS Payment validation
-  bool valid = validateWithVPS(txid);
-  if (valid) {
-    authorizeClient(clientIPStr, txid, 86400000UL); // 24 hours
+  // VPS Validation
+  bool valid = false;
+  if (internetConnected) {
+    valid = validateWithVPS(txid);
   }
   
-  server.send(200, "application/json", "{\"valid\":" + String(valid?"true":"false") + "}");
+  if (valid) {
+    authorizeClient(clientIPStr, txid, 86400000UL);
+  }
+  
+  server.send(200, "application/json", "{\"valid\":" + String(valid ? "true" : "false") + ",\"vps\":" + String(internetConnected ? "true" : "false") + "}");
 }
 
 void authorizeClient(String ip, String txid, unsigned long duration) {
-  // Remove old session
+  // Cleanup old
   for (int i = 0; i < sessionCount; i++) {
     if (sessions[i].ip == ip) {
-      for (int j = i; j < sessionCount-1; j++) {
-        sessions[j] = sessions[j+1];
+      for (int j = i; j < sessionCount - 1; j++) {
+        sessions[j] = sessions[j + 1];
       }
       sessionCount--;
-      break;
+      i--;
     }
   }
   
-  // Add new session
+  // Add new
   if (sessionCount < 50) {
     sessions[sessionCount].ip = ip;
     sessions[sessionCount].authorized = true;
     sessions[sessionCount].expiry = millis() + duration;
     sessions[sessionCount].txid = txid;
     sessionCount++;
-    Serial.println("Authorized: " + ip + " TXID:" + txid);
+    Serial.println("✅ Authorized " + ip + " (" + txid + ")");
   }
 }
 
-bool isClientAuthorized(String ip) {
+bool isClientAuthorized(String ipStr) {
   for (int i = 0; i < sessionCount; i++) {
-    if (sessions[i].ip == ip && sessions[i].authorized && 
-        millis() < sessions[i].expiry) {
+    if (sessions[i].ip == ipStr && sessions[i].authorized && millis() < sessions[i].expiry) {
       return true;
     }
   }
   return false;
 }
 
-bool validateWithVPS(String txid) {
-  if (!internetConnected) return false;
+void handleInternetRedirect() {
+  IPAddress clientIP = server.client().remoteIP();
+  String clientIPStr = clientIP.toString();
   
+  if (isClientAuthorized(clientIPStr) && internetConnected) {
+    server.sendHeader("Location", "http://www.google.com", true);
+    server.send(302);
+  } else {
+    server.sendHeader("Location", "/", true);
+    server.send(302);
+  }
+}
+
+void handleAdmin() {
+  String html = F(
+    "<!DOCTYPE html><html><head><title>BUSHIRI Admin</title>"
+    "<style>body{font-family:Arial;padding:40px;background:#f0f2f5;color:#333}"
+    "h1{color:#1e3c72;text-align:center}.metric{display:flex;justify-content:space-between;"
+    "background:white;padding:20px;margin:15px 0;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.1)}"
+    ".status{padding:10px 20px;border-radius:25px;font-weight:bold;font-size:18px}"
+    ".online{background:#d4edda;color:#2e7d32}.offline{background:#ffcdd2;color:#c62828}"
+    "ul{list-style:none;padding:0}li{padding:12px;background:#f8f9fa;margin:8px 0;border-radius:8px}</style>"
+  );
+  
+  html += "<body><h1>🔧 BUSHIRI PROJECT Admin Panel</h1>";
+  html += "<div class='metric'><span>Internet Status:</span><span class='status ";
+  html += internetConnected ? "online" : "offline";
+  html += "'>";
+  html += internetConnected ? "🟢 ONLINE" : "🔴 OFFLINE";
+  html += "</span></div>";
+  
+  html += "<div class='metric'><span>Modem IP:</span><span>";
+  html += WiFi.localIP().toString();
+  html += "</div>";
+  
+  html += "<div class='metric'><span>Active Sessions:</span><span>";
+  html += String(sessionCount);
+  html += "</div>";
+  
+  html += "<h3>📱 Active Clients:</h3><ul>";
+  for (int i = 0; i < sessionCount; i++) {
+    unsigned long remaining = (sessions[i].expiry > millis()) ? (sessions[i].expiry - millis()) / 1000 : 0;
+    html += "<li>IP: " + sessions[i].ip + " | TXID: " + sessions[i].txid + " | " + String(remaining) + "s left</li>";
+  }
+  html += "</ul><p style='text-align:center'><a href='/' style='color:#667eea;font-size:18px'>← Back to Portal</a></p></body></html>";
+  
+  server.send(200, "text/html", html);
+}
+
+bool validateWithVPS(String txid) {
   httpsClient.setInsecure();
-  httpsClient.setTimeout(8000);
+  httpsClient.setTimeout(10000);
+  
+  Serial.println("🔗 VPS Check: " + txid);
   
   if (!httpsClient.connect(VPS_HOST, VPS_PORT)) {
-    Serial.println("VPS connect failed");
+    Serial.println("❌ VPS connect failed");
     return false;
   }
   
-  String url = "/api/validate?txid=" + txid + 
-               "&token=" + VPS_TOKEN + 
-               "&amount=" + PAYMENT_AMOUNT + 
-               "&phone=" + MIX_NUMBER;
-  
-  httpsClient.print("GET " + url + " HTTP/1.1\r\n");
-  httpsClient.print("Host: " + String(VPS_HOST) + "\r\n");
-  httpsClient.print("Connection: close\r\n\r\n");
-  
-  unsigned long timeout = millis();
-  while (httpsClient.connected() && millis() - timeout < 5000) {
-    String line = httpsClient.readStringUntil('\n');
-    if (line == "\r") break;
-  }
+  String url = "/api/validate?txid=" + txid + "&token=" + VPS_TOKEN + "&amount=" + PAYMENT_AMOUNT + "&phone=" + MIX_NUMBER;
+  httpsClient.print("GET " + url + " HTTP/1.1\r\nHost: " + String(VPS_HOST) + "\r\nConnection: close\r\n\r\n");
   
   String response = "";
+  unsigned long timeout = millis();
+  while (httpsClient.connected() && millis() - timeout < 8000) {
+    if (httpsClient.available()) {
+      String line = httpsClient.readStringUntil('\n');
+      if (line == "\r") break;
+      response += line;
+    }
+  }
+  
   while (httpsClient.available()) {
     response += char(httpsClient.read());
   }
   httpsClient.stop();
   
-  Serial.println("VPS response: " + response);
+  Serial.println("VPS Response: " + response);
   
   DynamicJsonDocument doc(2048);
-  DeserializationError error = deserializeJson(doc, response);
-  if (error) return false;
+  DeserializationError err = deserializeJson(doc, response);
+  if (err) {
+    Serial.println("JSON parse error");
+    return false;
+  }
   
-  return doc["valid"] | false;
-}
-
-void handleInternetRedirect() {
-  String clientIP = server.client().remoteIP().toString();
-  if (isClientAuthorized(clientIP)) {
-    server.sendHeader("Location", "http://www.google.com", true);
-    server.send(302, "text/plain", "");
-  } else {
-    server.sendHeader("Location", "/", true);
-    server.send(302, "text/plain", "");
-  }
-}
-
-void handleAdmin() {
-  server.send(200, "text/html", 
-    "<html><body style='font-family:Arial;padding:30px;background:#f0f2f5'>"
-    "<h1 style='color:#1e3c72'>🔧 BUSHIRI PROJECT Admin</h1>"
-    "<p><strong>Internet:</strong> " + String(internetConnected ? "🟢 ONLINE" : "🔴 OFFLINE") + "</p>"
-    "<p><strong>Modem:</strong> " + MODEM_SSID + " (" + WiFi.localIP().toString() + ")</p>"
-    "<p><strong>Sessions:</strong> " + String(sessionCount) + "</p>"
-    "<h3>Active Users:</h3><ul>");
-    
-  for (int i = 0; i < sessionCount; i++) {
-    unsigned long remaining = (sessions[i].expiry - millis()) / 1000;
-    server.sendContent("<li>" + sessions[i].ip + " - " + sessions[i].txid + " (" + 
-                      String(remaining) + "s left)</li>");
-  }
-    
-  server.sendContent("</ul><p><a href='/'>← Portal</a></p></body></html>");
+  bool valid = doc["valid"] | false;
+  Serial.println("VPS Valid: " + String(valid ? "YES" : "NO"));
+  return valid;
 }
 
 void connectModem() {
   WiFi.begin(MODEM_SSID.c_str(), MODEM_PASS.c_str());
-  Serial.print("Connecting to " + MODEM_SSID + "...");
+  Serial.print("🌐 Connecting " + MODEM_SSID);
   
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 40) {
+  int i = 0;
+  while (WiFi.status() != WL_CONNECTED && i < 40) {
     delay(500);
     Serial.print(".");
-    attempts++;
+    i++;
   }
   
   internetConnected = (WiFi.status() == WL_CONNECTED);
   Serial.println();
-  Serial.println(internetConnected ? "✅ Modem connected: " + WiFi.localIP().toString() : "❌ Modem failed");
+  if (internetConnected) {
+    Serial.println("✅ Modem: " + WiFi.localIP().toString());
+  } else {
+    Serial.println("❌ Modem failed");
+  }
 }
 
 void checkInternet() {
   if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("🔄 Reconnecting modem...");
     connectModem();
   }
 }
 
 void reportToVPS() {
-  if (!internetConnected || sessionCount == 0) return;
+  if (!internetConnected) return;
   
   httpsClient.setInsecure();
-  if (httpsClient.connect(VPS_HOST, VPS_PORT)) {
-    DynamicJsonDocument doc(4096);
-    JsonArray clients = doc.createNestedArray("clients");
-    
-    for (int i = 0; i < sessionCount; i++) {
-      JsonObject client = clients.createNestedObject();
-      client["ip"] = sessions[i].ip;
-      client["txid"] = sessions[i].txid;
-      client["expires"] = sessions[i].expiry;
-    }
-    
-    doc["token"] = VPS_TOKEN;
-    doc["total"] = sessionCount;
-    doc["internet"] = internetConnected;
-    
-    String json;
-    serializeJson(doc, json);
-    
-    httpsClient.print("POST /api/report HTTP/1.1\r\n");
-    httpsClient.print("Host: " + String(VPS_HOST) + "\r\n");
-    httpsClient.print("Content-Type: application/json\r\n");
-    httpsClient.print("Content-Length: " + json.length() + "\r\n");
-    httpsClient.print("\r\n");
-    httpsClient.print(json);
-    
-    httpsClient.stop();
-    Serial.println("📤 VPS report sent");
+  if (!httpsClient.connect(VPS_HOST, VPS_PORT)) return;
+  
+  DynamicJsonDocument doc(4096);
+  JsonArray clients = doc.createNestedArray("clients");
+  
+  for (int i = 0; i < sessionCount; i++) {
+    JsonObject c = clients.createNestedObject();
+    c["ip"] = sessions[i].ip;
+    c["txid"] = sessions[i].txid;
+    c["expires"] = sessions[i].expiry;
   }
+  
+  doc["token"] = VPS_TOKEN;
+  doc["total"] = sessionCount;
+  doc["status"] = "online";
+  
+  String jsonStr;
+  serializeJson(doc, jsonStr);
+  
+  httpsClient.print("POST /api/report HTTP/1.1\r\n");
+  httpsClient.print("Host: ");
+  httpsClient.print(VPS_HOST);
+  httpsClient.print("\r\nContent-Type: application/json\r\n");
+  httpsClient.print("Content-Length: ");
+  httpsClient.print(jsonStr.length());
+  httpsClient.print("\r\nConnection: close\r\n\r\n");
+  httpsClient.print(jsonStr);
+  
+  httpsClient.stop();
+  Serial.println("📤 VPS report OK");
 }
 
 void cleanupExpiredSessions() {
-  int newCount = 0;
+  int keepCount = 0;
   for (int i = 0; i < sessionCount; i++) {
     if (millis() < sessions[i].expiry) {
-      sessions[newCount] = sessions[i];
-      newCount++;
+      if (keepCount != i) {
+        sessions[keepCount] = sessions[i];
+      }
+      keepCount++;
     }
   }
-  sessionCount = newCount;
+  sessionCount = keepCount;
 }
