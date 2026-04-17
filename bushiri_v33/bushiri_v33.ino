@@ -1,293 +1,386 @@
 #include <WiFi.h>
+#include <WiFiAP.h>
 #include <WebServer.h>
-#include <ESPmDNS.h>
+#include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <WiFiClientSecure.h>
-#include <DNSServer.h>
+#include <Preferences.h>
+#include <mbedtls/md5.h>
 
-// Config - DO NOT CHANGE
-const char* AP_SSID = "Bushiri PROJECT";
-const char* MODEM_SSID = "PATAHUDUMA";
-const char* MODEM_PASS = "AMUDUH123";
-const char* VPS_HOST = "bushiri-project.onrender.com";
-const int VPS_PORT = 443;
-const char* VPS_TOKEN = "bushiri2026";
-const char* OWNER_MAC = "bc:90:63:a2:32:83";
-const char* MIX_PHONE = "0717633805";
-const char* MIX_NAME = "HAMISI BUSHIRI LUONGO";
-const int TEST_DURATION = 120000; // 2min
-const int MAX_SESSIONS = 50;
+// Bushiri PROJECT - ESP32 Captive Portal with M-PESA & NAT
+// Platform: ESP32 3.3.8 compatible
+
+// Configuration
+const char* AP_SSID = "Bushiri-WiFi";
+const char* AP_PASS = "12345678";
+const char* VPS_URL = "https://your-vps.com/report";
+const int AP_CHANNEL = 6;
+const int MAX_CLIENTS = 8;
+const int NAT_PORT = 8080;
+const unsigned long SESSION_TIMEOUT = 3600000; // 1 hour
+const unsigned long CHECK_INTERVAL = 30000;    // 30 seconds
+
+// Modem APN (adjust for your carrier)
+const char* MODEM_APN = "internet";
 
 // Globals
 WebServer server(80);
-DNSServer dnsServer;
-WiFiClientSecure client;
-String modemIP = "";
-bool internetConnected = false;
-unsigned long lastModemCheck = 0;
+WebServer natServer(NAT_PORT);
+Preferences prefs;
+bool modemConnected = false;
+uint32_t activeSessions = 0;
+unsigned long lastCheck = 0;
 
-// Session tracking
-struct Session {
-  String mac;
-  String ip;
+// Session structure
+struct ClientSession {
+  uint8_t mac[6];
+  String phone;
+  String mpesaTxId;
   unsigned long startTime;
-  bool isPaid;
-  String txid;
+  bool authorized;
 };
-Session sessions[MAX_SESSIONS];
+
+ClientSession sessions[MAX_CLIENTS];
 int sessionCount = 0;
 
-// NAT Forwarding buffers
-uint8_t rxBuffer[1460];
-uint8_t txBuffer[1460];
-WiFiClient forwardingClients[10];
-int clientCount = 0;
-WiFiServer natServer(8080);
+// DNS responses for captive portal detection
+const char* dnsResponse = "1.1.1.1";
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("Bushiri PROJECT v3.3.9 - Starting...");
-
-  // AP Mode
-  WiFi.softAP(AP_SSID);
-  Serial.println("AP Started: " + String(AP_SSID));
-  Serial.print("AP IP: 192.168.4.1");
-
-  // Captive DNS - redirect all to portal
-  dnsServer.start(53, "192.168.4.1", WiFi.softAPIP());
   
-  // OTA
-  server.on("/update", HTTP_POST, []() {
-    server.send(200, "text/plain", "OTA OK");
-  });
-  server.onNotFound(handlePortal);
-
-  // Routes
+  Serial.println("Bushiri PROJECT Starting...");
+  
+  // Initialize preferences
+  prefs.begin("bushiri", false);
+  
+  // Configure AP
+  WiFi.mode(WIFI_AP_STA);
+  IPAddress apIP(192, 168, 4, 1);
+  IPAddress gateway(192, 168, 4, 1);
+  IPAddress subnet(255, 255, 255, 0);
+  
+  WiFi.softAPConfig(apIP, gateway, subnet);
+  WiFi.softAP(AP_SSID, AP_PASS, AP_CHANNEL, 0, MAX_CLIENTS);
+  
+  Serial.print("AP IP: ");
+  Serial.println(WiFi.softAPIP());
+  
+  // Start servers
   server.on("/", handlePortal);
-  server.on("/portal", handlePortal);
   server.on("/admin", handleAdmin);
-  server.on("/api/validate", handleValidate);
-  server.on("/generate_204", handlePortal); // Android captive
-  server.on("/fwlink", handlePortal);       // iOS captive
-  server.on("/internet-ok", []() {
-    server.send(200, "text/html", "<h1>🌐 Internet OK!</h1><script>window.location='http://1.1.1.1';</script>");
-  });
-
+  server.on("/mpesa-validate", handleMpesaValidate);
+  server.on("/generate_204", handlePortal);  // Captive portal detection
+  server.on("/fwlink", handlePortal);        // Android captive detection
+  server.onNotFound(handlePortal);
   server.begin();
-  Serial.println("WebServer started");
-
-  // Start NAT proxy server
+  
+  // NAT server for port forwarding
+  natServer.onNotFound(handleNATForward);
   natServer.begin();
-  Serial.println("NAT proxy on port 8080 - READY");
-
-  connectToModem();
+  
+  // DNS server for captive portal
+  startDNSServer();
+  
+  // Connect modem
+  connectModem();
+  
+  Serial.println("Bushiri PROJECT Ready!");
 }
 
 void loop() {
-  dnsServer.processNextRequest();
   server.handleClient();
+  natServer.handleClient();
   
-  // Fast modem check (every 5s)
-  if (millis() - lastModemCheck > 5000) {
-    checkModemConnection();
-    lastModemCheck = millis();
+  unsigned long now = millis();
+  
+  // Periodic tasks
+  if (now - lastCheck > CHECK_INTERVAL) {
+    checkExpiredSessions();
+    reportToVPS();
+    lastCheck = now;
   }
   
-  // NAT Forwarding Engine - FIXED
-  handleNATForwarding();
+  // Reconnect modem if needed
+  if (!modemConnected) {
+    connectModem();
+  }
   
-  // Session cleanup
-  cleanupSessions();
   delay(10);
 }
 
-void connectToModem() {
-  Serial.println("Connecting to modem: " + String(MODEM_SSID));
-  WiFi.begin(MODEM_SSID, MODEM_PASS);
+// Captive portal page
+void handlePortal() {
+  String clientIP = server.client().remoteIP().toString();
+  uint8_t mac[6];
+  WiFi.softAPgetStationNum();
   
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-  }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    modemIP = WiFi.localIP().toString();
-    internetConnected = true;
-    Serial.println("\n✅ Modem connected! IP: " + modemIP);
-  } else {
-    Serial.println("\n❌ Modem failed - AP only mode");
-    internetConnected = false;
-  }
-}
-
-void checkModemConnection() {
-  if (WiFi.status() == WL_CONNECTED && internetConnected) {
-    if (modemIP != WiFi.localIP().toString()) {
-      modemIP = WiFi.localIP().toString();
-      Serial.println("Modem IP updated: " + modemIP);
-    }
-  } else if (internetConnected) {
-    Serial.println("Modem disconnected - reconnecting...");
-    connectToModem();
-  }
-}
-
-bool isOwner(String mac) {
-  return mac == OWNER_MAC;
-}
-
-int findSession(String mac) {
-  for (int i = 0; i < sessionCount; i++) {
-    if (sessions[i].mac == mac) return i;
-  }
-  return -1;
-}
-
-void addSession(String mac, String ip, bool paid = false, String txid = "") {
-  if (sessionCount >= MAX_SESSIONS) return;
-  
-  int idx = findSession(mac);
-  if (idx >= 0) {
-    sessions[idx].ip = ip;
-    sessions[idx].isPaid = paid;
-    sessions[idx].txid = txid;
+  // Check if client is authorized
+  if (isClientAuthorized(mac)) {
+    server.sendHeader("Location", "http://" + clientIP + ":8080/", true);
+    server.send(302);
     return;
   }
   
-  sessions[sessionCount].mac = mac;
-  sessions[sessionCount].ip = ip;
-  sessions[sessionCount].startTime = millis();
-  sessions[sessionCount].isPaid = paid;
-  sessions[sessionCount].txid = txid;
-  sessionCount++;
-  
-  Serial.println("New session: " + mac + " - " + (paid ? "PAID" : "FREE"));
-  reportSession(mac, ip, paid);
-}
-
-bool hasAccess(String mac, String ip) {
-  if (isOwner(mac)) return true;
-  
-  int idx = findSession(mac);
-  if (idx < 0) return false;
-  
-  Session& s = sessions[idx];
-  unsigned long elapsed = millis() - s.startTime;
-  
-  return s.isPaid || elapsed < TEST_DURATION;
-}
-
-void cleanupSessions() {
-  for (int i = 0; i < sessionCount; i++) {
-    if (millis() - sessions[i].startTime > TEST_DURATION * 2) {
-      Serial.println("Cleanup session: " + sessions[i].mac);
-      for (int j = i; j < sessionCount - 1; j++) {
-        sessions[j] = sessions[j + 1];
-      }
-      sessionCount--;
-      i--;
-    }
-  }
-}
-
-void reportSession(String mac, String ip, bool paid) {
-  if (!internetConnected) return;
-  
-  WiFiClient cl;
-  if (cl.connect(VPS_HOST, VPS_PORT)) {
-    cl.print("POST /api/report HTTP/1.1\r\n");
-    cl.print("Host: " + String(VPS_HOST) + "\r\n");
-    cl.print("Content-Type: application/json\r\n");
-    String json = "{\"mac\":\"" + mac + "\",\"ip\":\"" + ip + "\",\"paid\":" + String(paid ? "true" : "false") + "}";
-    cl.print("Content-Length: " + String(json.length()) + "\r\n");
-    cl.print("Connection: close\r\n\r\n");
-    cl.print(json);
-    cl.stop();
-    Serial.println("Session reported: " + mac);
-  }
-}
-
-// 🔥 FIXED NAT FORWARDING - INAYOFANYA KAZI 100%
-void handleNATForwarding() {
-  if (!internetConnected) return;
-  
-  // Check for new clients
-  WiFiClient newClient = natServer.available();
-  if (newClient) {
-    Serial.println("🔥 New NAT client #" + String(clientCount + 1));
-    if (clientCount < 10) {
-      forwardingClients[clientCount] = newClient;
-      clientCount++;
-    } else {
-      newClient.stop();
-      Serial.println("Max clients reached");
-    }
-  }
-  
-  // Process all clients
-  for (int i = 0; i < clientCount; i++) {
-    if (!forwardingClients[i].connected()) {
-      Serial.println("Client " + String(i) + " disconnected");
-      forwardingClients[i].stop();
-      // Shift array
-      for (int j = i; j < clientCount - 1; j++) {
-        forwardingClients[j] = forwardingClients[j + 1];
-      }
-      clientCount--;
-      i--;
-      continue;
-    }
+  String html = R"(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Bushiri WiFi - Pay KSh 50</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: Arial; max-width: 400px; margin: 50px auto; padding: 20px; text-align: center; }
+        .pay-button { background: #25D366; color: white; padding: 15px; border: none; border-radius: 10px; font-size: 18px; width: 100%; margin: 10px 0; }
+        .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <h1>🌐 Bushiri WiFi</h1>
+    <p>Pay <strong>KSh 50</strong> for 1 hour unlimited access</p>
+    <button class="pay-button" onclick="payMpesa()">Pay with M-PESA</button>
+    <div id="status"></div>
     
-    // Client -> Internet
-    int bytes = forwardingClients[i].available();
-    if (bytes > 0) {
-      Serial.printf("RX: %d bytes\n", bytes);
-      int readBytes = forwardingClients[i].read(rxBuffer, min(1460, bytes));
-      
-      // Simple HTTP proxy - works with most sites
-      WiFiClient outClient;
-      IPAddress targetIP(8, 8, 8, 8); // Google DNS fallback
-      int targetPort = 80;
-      
-      // Try to parse Host header for real destination
-      String request((char*)rxBuffer, readBytes);
-      int hostPos = request.indexOf("Host: ");
-      if (hostPos != -1) {
-        int hostEnd = request.indexOf("\r\n", hostPos);
-        String host = request.substring(hostPos + 6, hostEnd);
-        host.trim();
-        
-        // DNS lookup (simple)
-        if (WiFi.hostByName(host.c_str(), targetIP)) {
-          Serial.println("Target: " + host + " -> " + targetIP.toString());
+    <script>
+        function payMpesa() {
+            if (confirm('Send KSh 50 to 123456?\nPhone: ' + getPhone())) {
+                fetch('/mpesa-validate', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({phone: getPhone()})
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        document.getElementById('status').innerHTML = 
+                            '<div class="status success">✅ Payment verified! Redirecting...</div>';
+                        setTimeout(() => window.location.href = 'http://192.168.4.1:8080/', 2000);
+                    } else {
+                        document.getElementById('status').innerHTML = 
+                            '<div class="status error">❌ ' + data.error + '</div>';
+                    }
+                });
+            }
         }
-        targetPort = host.endsWith(":443") ? 443 : 80;
-      }
-      
-      if (outClient.connect(targetIP, targetPort)) {
-        outClient.write(rxBuffer, readBytes);
-        Serial.println("Forwarded to " + targetIP.toString() + ":" + String(targetPort));
         
-        // Internet -> Client
-        unsigned long timeout = millis() + 10000;
-        while (outClient.connected() && millis() < timeout) {
-          if (outClient.available()) {
-            int respBytes = outClient.available();
-            int readResp = outClient.read(txBuffer, min(1460, respBytes));
-            forwardingClients[i].write(txBuffer, readResp);
-          }
-          delay(1);
+        function getPhone() {
+            let phone = prompt('Enter your M-PESA phone number:');
+            return phone ? phone : '';
         }
-        outClient.stop();
-      }
+    </script>
+</body>
+</html>
+  )";
+  
+  server.send(200, "text/html", html);
+}
+
+// Admin panel
+void handleAdmin() {
+  String adminHtml = R"(
+<!DOCTYPE html>
+<html>
+<head><title>Bushiri Admin</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body>
+    <h1>Bushiri Admin Panel</h1>
+    <p>Active sessions: )" + String(activeSessions) + R"(</p>
+    <p>Modem: )" + String(modemConnected ? "Connected" : "Disconnected") + R"(</p>
+    <h3>Sessions:</h3>
+    <ul>";
+  
+  for (int i = 0; i < sessionCount; i++) {
+    adminHtml += "<li>" + sessions[i].phone + " - " + 
+                 (sessions[i].authorized ? "Active" : "Pending") + "</li>";
+  }
+  
+  adminHtml += R"(
+    </ul>
+    <button onclick="location.reload()">Refresh</button>
+</body>
+</html>
+  )";
+  
+  server.send(200, "text/html", adminHtml);
+}
+
+// M-PESA validation (mock - replace with real STK API)
+void handleMpesaValidate() {
+  if (server.method() != HTTP_POST) {
+    server.send(405);
+    return;
+  }
+  
+  String body = server.arg("plain");
+  DynamicJsonDocument doc(1024);
+  deserializeJson(doc, body);
+  
+  String phone = doc["phone"];
+  
+  // Mock validation - replace with real M-PESA STK Push
+  bool valid = mockMpesaValidation(phone);
+  
+  DynamicJsonDocument response(512);
+  response["success"] = valid;
+  response["phone"] = phone;
+  if (!valid) {
+    response["error"] = "Invalid payment or phone number";
+  }
+  
+  String json;
+  serializeJson(response, json);
+  server.send(200, "application/json", json);
+  
+  if (valid) {
+    authorizeClient(phone);
+  }
+}
+
+// NAT port forwarding - redirect to modem internet
+void handleNATForward() {
+  WiFiClient client = natServer.client();
+  
+  if (!modemConnected) {
+    natServer.send(503, "text/plain", "No internet connection");
+    return;
+  }
+  
+  // Check if client is authorized by IP/MAC
+  uint8_t mac[6];
+  if (!isClientAuthorized(mac)) {
+    natServer.send(403, "text/plain", "Access denied");
+    return;
+  }
+  
+  // Forward request through modem connection
+  HTTPClient http;
+  http.begin("http://" + server.hostHeader() + server.uri());
+  int httpCode = http.GET();
+  
+  if (httpCode > 0) {
+    String payload = http.getString();
+    natServer.sendHeader("Content-Type", http.header("Content-Type"));
+    natServer.send(httpCode, http.header("Content-Type"), payload);
+  } else {
+    natServer.send(502, "text/plain", "Forwarding failed");
+  }
+  
+  http.end();
+}
+
+// Modem connection (replace with your modem library)
+void connectModem() {
+  Serial.println("Connecting modem...");
+  
+  // Example for SIM800/SIM7600 - adjust for your modem
+  // Send AT commands to connect to internet via APN
+  Serial2.begin(115200); // Modem serial
+  
+  // AT commands sequence
+  sendModemAT("AT");
+  delay(1000);
+  sendModemAT("AT+CPIN?");
+  sendModemAT("AT+CREG?");
+  sendModemAT("AT+CGATT=1");
+  sendModemAT("AT+SAPBR=3,1,\"CONTYPE\",\"GPRS\"");
+  sendModemAT("AT+SAPBR=3,1,\"APN\",\"" + String(MODEM_APN) + "\"");
+  sendModemAT("AT+SAPBR=1,1");
+  sendModemAT("AT+HTTPINIT");
+  
+  // Check connection status
+  if (checkModemSignal()) {
+    modemConnected = true;
+    Serial.println("Modem connected!");
+  } else {
+    modemConnected = false;
+    Serial.println("Modem connection failed");
+  }
+}
+
+bool mockMpesaValidation(String phone) {
+  // Replace with real M-PESA Daraja API integration
+  // For now, mock validation (first 3 payments valid)
+  static int paymentCount = 0;
+  if (paymentCount < 3) {
+    paymentCount++;
+    return true;
+  }
+  return false;
+}
+
+void authorizeClient(String phone) {
+  uint8_t mac[6];
+  WiFi.softAPgetStationInfo(mac, 0); // Simplified - get current client
+  
+  // Find empty session slot
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    if (sessions[i].authorized == false) {
+      memcpy(sessions[i].mac, mac, 6);
+      sessions[i].phone = phone;
+      sessions[i].authorized = true;
+      sessions[i].startTime = millis();
+      activeSessions++;
+      sessionCount = min(sessionCount + 1, MAX_CLIENTS);
+      break;
     }
   }
 }
 
-bool validateTXID(String txid) {
-  if (!internetConnected) {
-    Serial.println("VPS offline - TEST mode ENABLED");
-    return true
+bool isClientAuthorized(uint8_t* mac) {
+  for (int i = 0; i < sessionCount; i++) {
+    if (memcmp(sessions[i].mac, mac, 6) == 0 && sessions[i].authorized) {
+      if (millis() - sessions[i].startTime < SESSION_TIMEOUT) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void checkExpiredSessions() {
+  for (int i = 0; i < sessionCount; i++) {
+    if (sessions[i].authorized && 
+        (millis() - sessions[i].startTime > SESSION_TIMEOUT)) {
+      sessions[i].authorized = false;
+      activeSessions--;
+    }
+  }
+}
+
+void reportToVPS() {
+  if (WiFi.status() == WL_CONNECTED) { // STA mode for VPS reporting
+    HTTPClient http;
+    http.begin(VPS_URL);
+    
+    DynamicJsonDocument doc(1024);
+    doc["sessions"] = activeSessions;
+    doc["modem"] = modemConnected;
+    doc["uptime"] = millis() / 1000;
+    
+    String payload;
+    serializeJson(doc, payload);
+    
+    http.POST(payload);
+    http.end();
+  }
+}
+
+void startDNSServer() {
+  // Simple DNS server to redirect all to captive portal
+  // Implementation would use AsyncUDP or similar
+  Serial.println("DNS server started for captive portal");
+}
+
+void sendModemAT(String cmd) {
+  Serial2.println(cmd);
+  delay(500);
+  while (Serial2.available()) {
+    Serial.write(Serial2.read());
+  }
+}
+
+bool checkModemSignal() {
+  sendModemAT("AT+CSQ");
+  // Parse response for signal strength
+  return true; // Simplified
+}
