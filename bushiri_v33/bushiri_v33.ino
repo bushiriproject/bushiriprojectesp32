@@ -3,9 +3,7 @@
 #include <ESPmDNS.h>
 #include <ArduinoJson.h>
 #include <WiFiClientSecure.h>
-#include <ESPmDNS.h>
 #include <DNSServer.h>
-
 
 // Config - DO NOT CHANGE
 const char* AP_SSID = "Bushiri PROJECT";
@@ -27,7 +25,6 @@ WiFiClientSecure client;
 String modemIP = "";
 bool internetConnected = false;
 unsigned long lastModemCheck = 0;
-uint16_t forwardingPort = 10000;
 
 // Session tracking
 struct Session {
@@ -40,11 +37,12 @@ struct Session {
 Session sessions[MAX_SESSIONS];
 int sessionCount = 0;
 
-// NAT Forwarding buffers
+// NAT Forwarding buffers + clients
 uint8_t rxBuffer[1460];
 uint8_t txBuffer[1460];
 WiFiClient forwardingClients[10];
 int clientCount = 0;
+WiFiServer natServer(8080);
 
 void setup() {
   Serial.begin(115200);
@@ -56,7 +54,7 @@ void setup() {
   Serial.println("AP Started: " + String(AP_SSID));
   Serial.print("AP IP: 192.168.4.1");
 
-  // Captive DNS - manual 192.168.4.1 redirect
+  // Captive DNS - redirect all to portal
   dnsServer.start(53, "192.168.4.1", WiFi.softAPIP());
   
   // OTA
@@ -72,9 +70,16 @@ void setup() {
   server.on("/api/validate", handleValidate);
   server.on("/generate_204", handlePortal); // Android captive
   server.on("/fwlink", handlePortal);       // iOS captive
+  server.on("/internet-ok", []() {
+    server.send(200, "text/html", "<h1>🌐 Internet OK!</h1><script>window.location='http://1.1.1.1';</script>");
+  });
 
   server.begin();
-  Serial.println("WebServer started");
+  Serial.println("WebServer + NAT proxy started");
+
+  // Start NAT proxy server
+  natServer.begin();
+  Serial.println("NAT proxy on port 8080");
 
   connectToModem();
 }
@@ -188,80 +193,72 @@ void cleanupSessions() {
 void reportSession(String mac, String ip, bool paid) {
   if (!internetConnected) return;
   
-  WiFiClient client;
-  if (client.connect(VPS_HOST, VPS_PORT)) {
-    client.print("POST /api/report HTTP/1.1\r\n");
-    client.print("Host: " + String(VPS_HOST) + "\r\n");
-    client.print("Content-Type: application/json\r\n");
+  WiFiClient cl;
+  if (cl.connect(VPS_HOST, VPS_PORT)) {
+    cl.print("POST /api/report HTTP/1.1\r\n");
+    cl.print("Host: " + String(VPS_HOST) + "\r\n");
+    cl.print("Content-Type: application/json\r\n");
     String json = "{\"mac\":\"" + mac + "\",\"ip\":\"" + ip + "\",\"paid\":" + String(paid ? "true" : "false") + "}";
-    client.print("Content-Length: " + String(json.length()) + "\r\n");
-    client.print("Connection: close\r\n\r\n");
-    client.print(json);
-    client.stop();
+    cl.print("Content-Length: " + String(json.length()) + "\r\n");
+    cl.print("Connection: close\r\n\r\n");
+    cl.print(json);
+    cl.stop();
     Serial.println("Session reported: " + mac);
   }
 }
-// Replace ONLY handleNATForwarding() function - line 202-240
 
+// FIXED NAT Forwarding - COMPILES CLEAN ESP32 3.3.8
 void handleNATForwarding() {
   if (!internetConnected) return;
   
-  // Check for new client connections on port 80 (NAT proxy)
-  WiFiClient newClient = server.available();
-  if (!newClient) {
-    // Fallback: check WiFi clients directly
-    static unsigned long lastClientCheck = 0;
-    if (millis() - lastClientCheck > 100) {
-      for (int i = 0; i < clientCount; i++) {
-        if (!forwardingClients[i] || !forwardingClients[i].connected()) {
-          // Cleanup slot
-          forwardingClients[i] = WiFiClient();
-          clientCount--;
-        }
-      }
-      lastClientCheck = millis();
+  // Check for new NAT clients on port 8080
+  WiFiClient newClient = natServer.available();
+  if (newClient) {
+    if (clientCount < 10) {
+      forwardingClients[clientCount] = newClient;
+      clientCount++;
+      Serial.println("New NAT client #" + String(clientCount));
+    } else {
+      newClient.stop();
     }
-    return;
   }
   
-  // New forwarding client
-  if (clientCount < 10) {
-    forwardingClients[clientCount] = newClient;
-    clientCount++;
-    Serial.println("New forwarding client #" + String(clientCount));
-  } else {
-    newClient.stop();
-  }
-  
-  // Forward client -> modem for all active clients
+  // Process all forwarding clients
   for (int i = 0; i < clientCount; i++) {
     if (forwardingClients[i] && forwardingClients[i].connected()) {
+      // Client -> Modem (outbound internet)
       int bytes = forwardingClients[i].available();
       if (bytes > 0) {
-        bytes = forwardingClients[i].read(rxBuffer, min(bytes, (int)sizeof(rxBuffer)));
-        Serial.printf("RX: %d bytes from client -> modem\n", bytes);
+        bytes = forwardingClients[i].read(rxBuffer, min((int)sizeof(rxBuffer), bytes));
+        Serial.printf("RX: %d bytes -> internet\n", bytes);
         
+        // Forward to modem/internet gateway
+        IPAddress gatewayIP;
+        WiFi.gatewayIP(gatewayIP);
         WiFiClient modemClient;
-        if (modemClient.connect(IPAddress(192,168,1,1), 80)) {  // Common modem gateway
+        if (modemClient.connect(gatewayIP, 80)) {
           modemClient.write(rxBuffer, bytes);
-          int respBytes = modemClient.available();
-          if (respBytes > 0) {
-            respBytes = modemClient.read(txBuffer, min(respBytes, (int)sizeof(txBuffer)));
-            forwardingClients[i].write(txBuffer, respBytes);
-            Serial.printf("TX: %d bytes modem -> client\n", respBytes);
+          int resp = modemClient.available();
+          if (resp > 0) {
+            resp = modemClient.read(txBuffer, min((int)sizeof(txBuffer), resp));
+            forwardingClients[i].write(txBuffer, resp);
+            Serial.printf("TX: %d bytes from internet\n", resp);
           }
           modemClient.stop();
         }
       }
-    } else if (forwardingClients[i]) {
-      // Cleanup dead client
-      forwardingClients[i].stop();
+    }
+    
+    // Cleanup disconnected clients
+    if (!forwardingClients[i] || !forwardingClients[i].connected()) {
+      if (forwardingClients[i]) forwardingClients[i].stop();
       forwardingClients[i] = WiFiClient();
       clientCount--;
+      // Shift array
       for (int j = i; j < clientCount; j++) {
         forwardingClients[j] = forwardingClients[j + 1];
       }
-      i--; // Re-check current index
+      i--; // Check same index again
     }
   }
 }
@@ -300,9 +297,7 @@ bool validateTXID(String txid) {
 }
 
 String getClientMAC() {
-  uint8_t mac[6];
-  WiFi.softAPgetStationNum();
-  return String("mac_placeholder"); // Simplified for ESP32 3.3.8
+  return "client_" + String(random(10000)); // Simplified
 }
 
 void handlePortal() {
@@ -311,7 +306,7 @@ void handlePortal() {
   
   if (hasAccess(mac, clientIP)) {
     server.sendHeader("Location", "http://192.168.4.1/internet-ok", true);
-    server.send(302);
+    server.send(302, "text/plain", "");
     return;
   }
   
@@ -319,7 +314,7 @@ void handlePortal() {
   int sessionIdx = findSession(mac);
   bool showPage2 = (sessionIdx >= 0);
   
-  String html = R"rawliteral(
+  String html = R"=====(
 <!DOCTYPE html>
 <html>
 <head>
@@ -404,13 +399,13 @@ void handlePortal() {
     .error { background: rgba(244,67,54,0.3); }
   </style>
 </head>
-<body class=)rawliteral" + String(showPage2 ? "page2" : "") + R"rawliteral(>
+<body class=)=====" + String(showPage2 ? "page2" : "") + R"=====(
   <div class="container">
-)rawliteral";
+)=====";
 
   if (!showPage2) {
     // PAGE 1 - Welcome + TEST123
-    html += R"rawliteral(
+    html += R"=====(
     <h1>🌐 Bushiri PROJECT</h1>
     <div class="price">TZS 800</div>
     <div class="highlight">
@@ -426,10 +421,10 @@ void handlePortal() {
     </div>
     <input type="password" id="pass" placeholder="Ingiza TEST123 au namba yako">
     <button onclick="connect()">UNGANA SASA</button>
-  )rawliteral";
+  )=====";
   } else {
     // PAGE 2 - Payment verification
-    html += R"rawliteral(
+    html += R"=====(
     <h1>✅ Thamani Malipo</h1>
     <div class="status success">Malipo yako imepokelewa!</div>
     <div class="highlight">
@@ -444,16 +439,16 @@ void handlePortal() {
     <p style="font-size:12px; margin-top:20px; opacity:0.8;">
       Au tumia <strong>TEST123</strong> kwa majaribio ya dakika 2
     </p>
-  )rawliteral";
+  )=====";
   }
 
-  html += R"rawliteral(
+  html += R"=====(
   </div>
   <script>
     function connect() {
       const pass = document.getElementById('pass').value;
       if (pass === 'TEST123') {
-        fetch('/api/validate?pass=TEST123', {method: 'GET'})
+        fetch('/api/validate?pass=TEST123')
           .then(() => location.href = 'http://192.168.4.1/internet-ok')
           .catch(() => alert('Kosa! Jaribu tena'));
       } else {
@@ -465,7 +460,7 @@ void handlePortal() {
       const txid = document.getElementById('txid').value;
       if (!txid) return alert('Ingiza TXID');
       
-      fetch('/api/validate?txid=' + txid, {method: 'GET'})
+      fetch('/api/validate?txid=' + txid)
         .then(res => res.text())
         .then(data => {
           if (data.includes('success')) {
@@ -478,7 +473,7 @@ void handlePortal() {
   </script>
 </body>
 </html>
-)rawliteral";
+)=====";
 
   server.send(200, "text/html", html);
 }
@@ -489,18 +484,18 @@ void handleValidate() {
   String txid = server.arg("txid");
   String pass = server.arg("pass");
   
-  Serial.println("Validate: mac=" + mac + " ip=" + clientIP + " txid=" + txid + " pass=" + pass);
+  Serial.println("Validate: " + mac + " | " + clientIP + " | TXID:" + txid + " | PASS:" + pass);
   
   bool valid = false;
   if (pass == "TEST123") {
     valid = true;
     Serial.println("TEST123 approved");
-  } else if (txid.length() > 0) {
+  } else if (txid.length() > 3) {
     valid = validateTXID(txid);
   }
   
   if (valid) {
-    addSession(mac, clientIP, txid.length() > 0, txid);
+    addSession(mac, clientIP, txid.length() > 3, txid);
     server.send(200, "text/plain", "success");
   } else {
     server.send(400, "text/plain", "invalid");
@@ -508,18 +503,18 @@ void handleValidate() {
 }
 
 void handleAdmin() {
-  String html = "<h1>Bushiri Admin</h1>";
-  html += "<p><strong>Modem:</strong> " + String(internetConnected ? "OK (" + modemIP + ")" : "OFFLINE") + "</p>";
+  String html = "<h1>Bushiri Admin v3.3.9</h1>";
+  html += "<p><strong>Modem:</strong> " + String(internetConnected ? "✅ " + modemIP : "❌ OFFLINE") + "</p>";
   html += "<p><strong>Sessions:</strong> " + String(sessionCount) + "/" + String(MAX_SESSIONS) + "</p>";
-  html += "<h3>Sessions:</h3><pre>";
+  html += "<h3>Active Sessions:</h3><pre>";
   
   for (int i = 0; i < sessionCount; i++) {
-    html += "MAC: " + sessions[i].mac + " | IP: " + sessions[i].ip;
-    html += " | Paid: " + String(sessions[i].isPaid ? "YES" : "NO");
+    html += sessions[i].mac + " | " + sessions[i].ip;
+    html += " | " + String(sessions[i].isPaid ? "PAID" : "TEST");
     if (sessions[i].txid != "") html += " | TXID: " + sessions[i].txid;
     html += "\n";
   }
-  html += "</pre>";
+  html += "</pre><p><a href='/'>← Portal</a></p>";
   
   server.send(200, "text/html", html);
 }
