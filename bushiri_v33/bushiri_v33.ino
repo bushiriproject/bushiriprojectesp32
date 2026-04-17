@@ -5,7 +5,7 @@
 #include <WiFiClientSecure.h>
 #include <ESPmDNS.h>
 #include <DNSServer.h>
-#include <WiFiManager.h>
+
 
 // Config - DO NOT CHANGE
 const char* AP_SSID = "Bushiri PROJECT";
@@ -56,8 +56,8 @@ void setup() {
   Serial.println("AP Started: " + String(AP_SSID));
   Serial.print("AP IP: 192.168.4.1");
 
-  // DNS Captive Portal
-  dnsServer.start(53, "*", WiFi.softAPIP());
+  // Captive DNS - manual 192.168.4.1 redirect
+  dnsServer.start(53, "192.168.4.1", WiFi.softAPIP());
   
   // OTA
   server.on("/update", HTTP_POST, []() {
