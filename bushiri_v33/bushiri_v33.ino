@@ -201,46 +201,67 @@ void reportSession(String mac, String ip, bool paid) {
     Serial.println("Session reported: " + mac);
   }
 }
+// Replace ONLY handleNATForwarding() function - line 202-240
 
-// FIXED NAT Forwarding Engine
 void handleNATForwarding() {
   if (!internetConnected) return;
   
-  // Handle incoming client connections
+  // Check for new client connections on port 80 (NAT proxy)
   WiFiClient newClient = server.available();
-  if (newClient) {
-    if (clientCount < 10) {
-      forwardingClients[clientCount] = newClient;
-      clientCount++;
-      Serial.println("New forwarding client #" + String(clientCount));
+  if (!newClient) {
+    // Fallback: check WiFi clients directly
+    static unsigned long lastClientCheck = 0;
+    if (millis() - lastClientCheck > 100) {
+      for (int i = 0; i < clientCount; i++) {
+        if (!forwardingClients[i] || !forwardingClients[i].connected()) {
+          // Cleanup slot
+          forwardingClients[i] = WiFiClient();
+          clientCount--;
+        }
+      }
+      lastClientCheck = millis();
     }
+    return;
   }
   
-  // Forward client -> modem
+  // New forwarding client
+  if (clientCount < 10) {
+    forwardingClients[clientCount] = newClient;
+    clientCount++;
+    Serial.println("New forwarding client #" + String(clientCount));
+  } else {
+    newClient.stop();
+  }
+  
+  // Forward client -> modem for all active clients
   for (int i = 0; i < clientCount; i++) {
     if (forwardingClients[i] && forwardingClients[i].connected()) {
-      int bytes = forwardingClients[i].read(rxBuffer, sizeof(rxBuffer));
+      int bytes = forwardingClients[i].available();
       if (bytes > 0) {
+        bytes = forwardingClients[i].read(rxBuffer, min(bytes, (int)sizeof(rxBuffer)));
         Serial.printf("RX: %d bytes from client -> modem\n", bytes);
         
         WiFiClient modemClient;
-        if (modemClient.connect(modemIP.c_str(), 80)) {  // Use modem as gateway
+        if (modemClient.connect(IPAddress(192,168,1,1), 80)) {  // Common modem gateway
           modemClient.write(rxBuffer, bytes);
-          int resp = modemClient.read(txBuffer, sizeof(txBuffer));
-          if (resp > 0) {
-            forwardingClients[i].write(txBuffer, resp);
-            Serial.printf("TX: %d bytes modem -> client\n", resp);
+          int respBytes = modemClient.available();
+          if (respBytes > 0) {
+            respBytes = modemClient.read(txBuffer, min(respBytes, (int)sizeof(txBuffer)));
+            forwardingClients[i].write(txBuffer, respBytes);
+            Serial.printf("TX: %d bytes modem -> client\n", respBytes);
           }
           modemClient.stop();
         }
       }
-    } else {
+    } else if (forwardingClients[i]) {
       // Cleanup dead client
+      forwardingClients[i].stop();
       forwardingClients[i] = WiFiClient();
       clientCount--;
       for (int j = i; j < clientCount; j++) {
         forwardingClients[j] = forwardingClients[j + 1];
       }
+      i--; // Re-check current index
     }
   }
 }
