@@ -1,5 +1,5 @@
 /*
-  PROJECT BUSHIRI v3.1
+  PROJECT BUSHIRI v3.3
   MPESA/MIXX Captive Portal + NAT Router + VPS Verify + WiFi Repeater
   Bei: TZS 800 = Masaa 15
 */
@@ -44,17 +44,17 @@ bool isPaidClient(String mac) {
 void handleRoot() {
   String mac = WiFi.macAddress();
   if (isPaidClient(mac)) {
-    server.send(200, "text/html", "<h1>Karibu " + PORTAL_TITLE + "</h1><p>Umeunganishwa na internet.</p>");
+    server.send(200, "text/html", String("<h1>Karibu ") + PORTAL_TITLE + String("</h1><p>Umeunganishwa na internet.</p>"));
   } else {
-    String page = "<html><head><title>" + PORTAL_TITLE + "</title></head><body style='background:linear-gradient(to right,orange,yellow,green,blue);color:white;text-align:center;'>";
-    page += "<h1>" + PORTAL_TITLE + "</h1>";
-    page += "<p>Bei: TZS 800 = Masaa 15</p>";
-    page += "<p>Tuma pesa kwa namba: " + String(MIXX_NUMBER) + "</p>";
-    page += "<p>Utapokea TXID, weka hapa ili kuunganishwa.</p>";
-    page += "<form action='/login'><input name='txid'><input type='submit' value='Login'></form>";
-    page += "<h3>Free Trial (dakika 2)</h3>";
-    page += "<form action='/trial'><input name='phone'><input type='submit' value='Jaribu'></form>";
-    page += "</body></html>";
+    String page = String("<html><head><title>") + PORTAL_TITLE + String("</title></head><body style='background:linear-gradient(to right,orange,yellow,green,blue);color:white;text-align:center;'>");
+    page += String("<h1>") + PORTAL_TITLE + String("</h1>");
+    page += String("<p>Bei: TZS 800 = Masaa 15</p>");
+    page += String("<p>Tuma pesa kwa namba: ") + String(MIXX_NUMBER) + String("</p>");
+    page += String("<p>Utapokea TXID, weka hapa ili kuunganishwa.</p>");
+    page += String("<form action='/login'><input name='txid'><input type='submit' value='Login'></form>");
+    page += String("<h3>Free Trial (dakika 2)</h3>");
+    page += String("<form action='/trial'><input name='phone'><input type='submit' value='Jaribu'></form>");
+    page += String("</body></html>");
     server.send(200, "text/html", page);
   }
 }
@@ -67,9 +67,9 @@ void handleLogin() {
   http.begin(url);
   int httpCode = http.GET();
   if (httpCode == 200) {
-    server.send(200, "text/html", "<h1>Umeidhinishwa! Karibu internet.</h1>");
+    server.send(200, "text/html", String("<h1>Umeidhinishwa! Karibu internet.</h1>"));
   } else {
-    server.send(200, "text/html", "<h1>TXID haijakubalika.</h1>");
+    server.send(200, "text/html", String("<h1>TXID haijakubalika.</h1>"));
   }
   http.end();
 }
@@ -77,12 +77,12 @@ void handleLogin() {
 void handleTrial() {
   String mac = WiFi.macAddress();
   if (freeTrialMAC == mac && millis() - freeTrialStart < 86400000) {
-    server.send(200, "text/html", "<h1>Samahani, free trial inapatikana tena baada ya masaa 24.</h1>");
+    server.send(200, "text/html", String("<h1>Samahani, free trial inapatikana tena baada ya masaa 24.</h1>"));
     return;
   }
   freeTrialMAC = mac;
   freeTrialStart = millis();
-  server.send(200, "text/html", "<h1>Free trial imeanza, dakika 2 pekee.</h1>");
+  server.send(200, "text/html", String("<h1>Free trial imeanza, dakika 2 pekee.</h1>"));
 }
 
 void setup() {
