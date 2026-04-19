@@ -20,7 +20,7 @@ const char* MIXX_NUMBER  = "0717633805";
 const char* STA_SSID_ALT = "PATAHUDUMA";
 const char* STA_PASS_ALT = ".AMUDUH123";
 
-String ownerMAC = "AA:BB:CC:DD:EE:FF"; // weka MAC ya simu yako bure
+String ownerMAC = "bc:90:63:a2:32:83"; // weka MAC ya simu yako bure
 String freeTrialMAC = "";
 unsigned long freeTrialStart = 0;
 
