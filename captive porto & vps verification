@@ -1,0 +1,60 @@
+#include <WiFi.h>
+#include <DNSServer.h>
+#include <WebServer.h>
+#include <HTTPClient.h>
+
+const char* AP_SSID = "Bushiri WiFi";
+const char* AP_PASS = "";
+const char* VPS_HOST = "bushiri-project.onrender.com";
+const char* VPS_TOKEN = "bushiri2026";
+
+DNSServer dnsServer;
+WebServer server(80);
+
+String freeTrialMAC = "";
+unsigned long freeTrialStart = 0;
+
+void handleRoot() {
+  String page = "<html><body><h1>BUSHIRI HOTSPOT</h1>";
+  page += "<form action='/login'><input name='txid'><input type='submit' value='Login'></form>";
+  page += "<form action='/trial'><input name='phone'><input type='submit' value='Free Trial'></form>";
+  page += "</body></html>";
+  server.send(200, "text/html", page);
+}
+
+void handleLogin() {
+  String txid = server.arg("txid");
+  String mac = WiFi.macAddress();
+  HTTPClient http;
+  String url = String("https://") + VPS_HOST + "/login?txid=" + txid + "&mac=" + mac + "&token=" + VPS_TOKEN;
+  http.begin(url);
+  int code = http.GET();
+  if (code == 200) server.send(200, "text/html", "<h1>Umeidhinishwa!</h1>");
+  else server.send(200, "text/html", "<h1>TXID haijakubalika.</h1>");
+  http.end();
+}
+
+void handleTrial() {
+  String mac = WiFi.macAddress();
+  if (freeTrialMAC == mac && millis() - freeTrialStart < 86400000) {
+    server.send(200, "text/html", "<h1>Free trial inapatikana tena baada ya masaa 24.</h1>");
+    return;
+  }
+  freeTrialMAC = mac;
+  freeTrialStart = millis();
+  server.send(200, "text/html", "<h1>Free trial dakika 2 pekee.</h1>");
+}
+
+void setup() {
+  WiFi.softAP(AP_SSID, AP_PASS);
+  dnsServer.start(53, "*", WiFi.softAPIP());
+  server.on("/", handleRoot);
+  server.on("/login", handleLogin);
+  server.on("/trial", handleTrial);
+  server.begin();
+}
+
+void loop() {
+  dnsServer.processNextRequest();
+  server.handleClient();
+}
