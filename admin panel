@@ -1,0 +1,35 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Update.h>
+#include "lwip/napt.h"
+
+const char* AP_SSID = "BushiriAdmin";
+const char* AP_PASS = "admin123";
+
+WebServer server(80);
+bool natEnabled = true;
+
+void handleAdmin() {
+  String page = "<html><body><h1>Admin Panel</h1>";
+  page += "<form action='/nat'><input type='submit' value='Toggle NAT'></form>";
+  page += "</body></html>";
+  server.send(200, "text/html", page);
+}
+
+void handleNat() {
+  natEnabled = !natEnabled;
+  if (natEnabled) ip_napt_enable(WiFi.softAPIP(), 1);
+  else ip_napt_enable(WiFi.softAPIP(), 0);
+  server.send(200, "text/html", String("<h1>NAT ") + (natEnabled ? "Enabled" : "Disabled") + "</h1>");
+}
+
+void setup() {
+  WiFi.softAP(AP_SSID, AP_PASS);
+  server.on("/", handleAdmin);
+  server.on("/nat", handleNat);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+}
